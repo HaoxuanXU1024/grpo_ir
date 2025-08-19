@@ -8,18 +8,16 @@ import torch.nn as nn
 import numpy as np
 from typing import Optional, Dict, Any
 from tensordict import TensorDict
-from torchrl.envs import EnvBase
-from torchrl.data import CompositeSpec, UnboundedContinuousTensorSpec, BoundedTensorSpec
 import torch.nn.functional as F
 
-from net.model_torchrl import AdaIRTorchRL  # 使用TorchRL版本
+from net.model import AdaIR
 from utils.val_utils import compute_psnr_ssim
 from utils.pytorch_ssim import SSIM
 import lpips
 
 
-class AdaIRGRPOEnv(EnvBase):
-    """TorchRL环境包装器：将AdaIR的GRPO训练包装成标准RL环境"""
+class AdaIRGRPOEnv:
+    """AdaIR GRPO环境，支持真正的策略参数注入"""
     
     def __init__(self, 
                  batch_size: int = 1,
@@ -31,77 +29,32 @@ class AdaIRGRPOEnv(EnvBase):
         
         self.batch_size = batch_size
         self.reward_weights = reward_weights
+        self.device = device
         
-        # 初始化AdaIR模型（TorchRL版本）
-        self.adair_model = AdaIRTorchRL(decoder=True).to(device)
+        # 初始化AdaIR模型
+        self.adair_model = AdaIR(decoder=True).to(device)
         self.adair_model.eval()
         
         # 奖励计算组件
         self.ssim_metric = SSIM().eval().to(device)
         self.lpips_metric = lpips.LPIPS(net='alex').eval().to(device)
         
-        # 定义观察空间：退化图像patch
-        self.observation_spec = CompositeSpec({
-            "degraded_image": UnboundedContinuousTensorSpec(
-                shape=(3, 128, 128), 
-                device=device,
-                dtype=torch.float32
-            ),
-            "clean_image": UnboundedContinuousTensorSpec(
-                shape=(3, 128, 128),
-                device=device, 
-                dtype=torch.float32
-            ),
-        }, shape=(batch_size,))
-        
-        # 定义动作空间：每个FreModule的Beta分布参数
-        # 3个FreModule × 8个参数 = 24维动作空间
-        self.action_spec = CompositeSpec({
-            "freq_params": BoundedTensorSpec(
-                low=0.1, high=10.0,  # Beta分布参数范围
-                shape=(3, 8),  # 3个FreModule，每个8个参数(4个alpha+4个beta)  
-                device=device,
-                dtype=torch.float32
-            )
-        }, shape=(batch_size,))
-        
-        # 定义奖励空间
-        self.reward_spec = UnboundedContinuousTensorSpec(
-            shape=(1,), device=device, dtype=torch.float32
-        )
-        
-        super().__init__(
-            device=device,
-            batch_size=[batch_size] if batch_size > 1 else [],
-        )
-        
         # 当前状态
         self.current_degraded = None
         self.current_clean = None
         
-    def _reset(self, tensordict: TensorDict, **kwargs) -> TensorDict:
-        """重置环境，加载新的图像数据"""
-        # 这里通常从数据加载器获取新数据
-        # 为演示，我们生成随机数据
-        batch_shape = tensordict.shape if tensordict is not None else (self.batch_size,)
-        
-        self.current_degraded = torch.randn(*batch_shape, 3, 128, 128, device=self.device)
-        self.current_clean = torch.randn(*batch_shape, 3, 128, 128, device=self.device)
-        
-        # 规范化到[0,1]
-        self.current_degraded = torch.clamp(self.current_degraded, 0, 1)
-        self.current_clean = torch.clamp(self.current_clean, 0, 1)
-        
-        return TensorDict({
-            "degraded_image": self.current_degraded,
-            "clean_image": self.current_clean,
-        }, batch_size=batch_shape, device=self.device)
+    def reset(self, obs_dict=None):
+        """重置环境"""
+        if obs_dict is not None:
+            self.current_degraded = obs_dict.get("degraded_image")
+            self.current_clean = obs_dict.get("clean_image")
+        return obs_dict
     
-    def _step(self, tensordict: TensorDict) -> TensorDict:
+    def step(self, action_dict):
         """执行一步：使用策略动作运行AdaIR并计算奖励"""
         
         # 提取动作参数
-        freq_params = tensordict["action"]["freq_params"]  # [B, 3, 8]
+        freq_params = action_dict["action"]["freq_params"]  # [B, 3, 8]
         
         # 运行AdaIR模型with策略参数
         restored_image = self._run_adair_with_policy(
@@ -111,32 +64,88 @@ class AdaIRGRPOEnv(EnvBase):
         # 计算奖励
         reward = self._compute_reward(restored_image, self.current_clean)
         
-        # 准备输出
-        next_state = TensorDict({
-            "degraded_image": self.current_degraded,
-            "clean_image": self.current_clean,
-        }, batch_size=self.current_degraded.shape[:1], device=self.device)
-        
         # 对于图像修复任务，每个episode只有一步
         done = torch.ones(self.current_degraded.shape[0], 1, device=self.device, dtype=torch.bool)
         
         return TensorDict({
-            **next_state,
+            "degraded_image": self.current_degraded,
+            "clean_image": self.current_clean,
             "reward": reward,
             "done": done,
             "restored_image": restored_image,  # 用于调试和可视化
         }, batch_size=self.current_degraded.shape[:1], device=self.device)
     
     def _run_adair_with_policy(self, degraded: torch.Tensor, freq_params: torch.Tensor) -> torch.Tensor:
-        """使用策略参数运行AdaIR模型"""
+        """使用策略参数运行AdaIR模型 - 真正的参数注入版本"""
+        
+        # 注入策略参数到FreModule
+        self._inject_policy_to_fremodules(freq_params)
         
         with torch.no_grad():
-            # 使用TorchRL版本的参数注入
-            restored = self.adair_model(degraded, stochastic=True, external_params=freq_params)
-            if isinstance(restored, tuple):
-                restored = restored[0]  # 只要输出，不要log_prob
+            # 使用stochastic=True模式，这样FreModule会使用我们注入的参数
+            result = self.adair_model(degraded, stochastic=True)
+            if isinstance(result, tuple):
+                restored = result[0]  # (output, log_prob)
+            else:
+                restored = result
             
         return restored
+    
+    def _inject_policy_to_fremodules(self, freq_params: torch.Tensor):
+        """将策略参数注入到AdaIR的FreModule中"""
+        
+        # 获取3个FreModule
+        fre_modules = [self.adair_model.fre1, self.adair_model.fre2, self.adair_model.fre3]
+        
+        for i, fre_module in enumerate(fre_modules):
+            params = freq_params[:, i, :]  # [B, 8]
+            
+            # 覆盖策略头的前向传播
+            # 这是一个hack，但对于RL训练是必要的
+            self._override_policy_head(fre_module, params)
+    
+    def _override_policy_head(self, fre_module, params):
+        """临时覆盖FreModule的策略头输出"""
+        
+        # 分离rate和fuse参数
+        rate_params = params[:, :4]   # [B, 4] - alpha_h, beta_h, alpha_w, beta_w  
+        fuse_params = params[:, 4:8]  # [B, 4] - alpha_1, beta_1, alpha_2, beta_2
+        
+        # 创建临时的forward函数来替换policy_rate的输出
+        def temp_rate_forward(x):
+            # x是pooled特征 [B, dim, 1, 1]
+            batch_size = x.size(0)
+            # 直接返回我们的策略参数，确保形状正确
+            output = rate_params.view(batch_size, 4, 1, 1)
+            # 应用softplus确保参数为正
+            return F.softplus(output) + 1e-4
+        
+        def temp_fuse_forward(x):
+            # x是pooled特征 [B, dim, 1, 1] 
+            batch_size = x.size(0)
+            # 直接返回我们的融合参数
+            output = fuse_params.view(batch_size, 4, 1, 1)
+            return F.softplus(output) + 1e-4
+        
+        # 临时替换forward方法
+        fre_module.policy_rate._temp_forward = fre_module.policy_rate.forward
+        fre_module.policy_rate.forward = temp_rate_forward
+        
+        fre_module.policy_fuse._temp_forward = fre_module.policy_fuse.forward  
+        fre_module.policy_fuse.forward = temp_fuse_forward
+    
+    def _restore_policy_heads(self):
+        """恢复原始的策略头"""
+        fre_modules = [self.adair_model.fre1, self.adair_model.fre2, self.adair_model.fre3]
+        
+        for fre_module in fre_modules:
+            if hasattr(fre_module.policy_rate, '_temp_forward'):
+                fre_module.policy_rate.forward = fre_module.policy_rate._temp_forward
+                delattr(fre_module.policy_rate, '_temp_forward')
+                
+            if hasattr(fre_module.policy_fuse, '_temp_forward'):
+                fre_module.policy_fuse.forward = fre_module.policy_fuse._temp_forward
+                delattr(fre_module.policy_fuse, '_temp_forward')
     
     def _compute_reward(self, restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
         """计算多指标组合奖励"""
@@ -151,7 +160,7 @@ class AdaIRGRPOEnv(EnvBase):
                 psnr = 10.0 * torch.log10(1.0 / mse)
                 psnr_norm = torch.clamp(psnr / 40.0, 0.0, 1.0)
                 
-                # SSIM
+                # SSIM  
                 ssim = self.ssim_metric(restored[i:i+1], clean[i:i+1])
                 ssim_norm = torch.clamp(ssim, 0.0, 1.0)
                 
@@ -170,6 +179,9 @@ class AdaIRGRPOEnv(EnvBase):
                 )
                 
                 rewards[i, 0] = total_reward
+        
+        # 恢复策略头
+        self._restore_policy_heads()
         
         return rewards
     
@@ -199,12 +211,11 @@ class AdaIRPolicyNetwork(nn.Module):
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, 3 * 8),  # 24个参数
-            nn.Softplus(),  # 确保输出为正
         )
         
         # 初始化：输出接近1.0，对应Beta(1,1)均匀分布
-        self.policy_head[-2].bias.data.fill_(0.0)
-        self.policy_head[-2].weight.data.normal_(0, 0.01)
+        self.policy_head[-1].bias.data.fill_(1.0)  # 初始化为1.0
+        self.policy_head[-1].weight.data.normal_(0, 0.01)
         
     def forward(self, observation: TensorDict) -> TensorDict:
         """策略网络前向传播"""
@@ -215,7 +226,8 @@ class AdaIRPolicyNetwork(nn.Module):
         features = self.feature_extractor(degraded_image)
         
         # 输出策略参数
-        policy_params = self.policy_head(features) + 0.1  # 确保最小值0.1
+        policy_params = self.policy_head(features)  # [B, 24]
+        policy_params = torch.exp(policy_params) + 0.1  # 确保为正，使用exp而不是softplus
         policy_params = policy_params.view(-1, 3, 8)  # [B, 3, 8]
         
         return TensorDict({
