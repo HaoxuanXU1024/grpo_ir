@@ -1,0 +1,131 @@
+% \clearpage
+\section{Mathematical Derivations for Stochastic Sampling using Flow Models}\label{app:sec:math}
+
+We present a detailed proof here. To compute $p_{\theta}(\vx_{t-1} \mid \vx_t, \vc)$ in Equation~\ref{eq:grpoloss} during forward sampling, we adapt flow models to a stochastic differential equation (SDE). While flow models normally follow a deterministic ODE:
+\begin{equation}
+    \dd \vx_t = \vv_t \dd t
+    \label{app:eq:ode}
+\end{equation}
+
+We consider its stochastic counterpart. Inspired by the derivation from SDE to its probability flow ODE in SGMs~\cite{song2020score}, we aim to construct a forward SDE with specific drift and diffusion coefficients so that its marginal distribution matches that of Eq.~\ref{app:eq:ode}. We begin with the generic form of SDE:
+\begin{equation}
+    \dd \vx_t = f_{\text{SDE}}(\vx_t, t) \dd t + \sigma_t \dd \vw, 
+    \label{app:eq:generic_sde}
+\end{equation}
+Its marginal probability density $p_t(\vx)$ evolves according to the Fokker–Planck equation~\cite{oksendal2003stochastic}, i.e.,
+\begin{equation}
+    \partial_{t}p_{t}(x) = -\nabla \cdot [f_{\text{SDE}}(\vx_t, t) p_{t}(\vx)] + \frac{1}{2}\nabla^{2}[\sigma_t^{2}p_{t}(\vx)]
+    \label{app:eq:sde_fp}
+\end{equation}
+Similarly, the marginal probability density associated with Eq.~\ref{app:eq:ode} evolves: 
+\begin{equation}
+\begin{aligned}
+\partial_{t}p_{t}(\vx) &= -\nabla \cdot [\vv_t(\vx_t, t) p_{t}(\vx)] \\
+\end{aligned}
+\label{app:eq:ode_fp}
+\end{equation}
+
+To ensure that the stochastic process shares the same marginal distribution as the ODE, we impose:
+\begin{equation}
+-\nabla \cdot [f_{\text{SDE}}\, p_{t}(\vx)] + \frac{1}{2}\nabla^{2}[\sigma_t^{2} p_{t}(\vx)] = -\nabla \cdot [\vv_t(\vx_t, t) p_{t}(\vx)]
+\label{app:eq:sde_ode_fp}
+\end{equation}
+Observing that
+\begin{equation}
+\begin{aligned}
+\nabla^{2}[\sigma_t^{2}p_{t}(\vx)] &= \sigma_t^{2}\nabla^{2}p_{t}(\vx) \\
+&= \sigma_t^{2}\nabla \cdot (\nabla p_{t}(\vx)) \\
+&= \sigma_t^{2}\nabla \cdot (p_{t}(\vx) \nabla \log p_{t}(\vx)) \\
+\end{aligned}
+\label{app:eq:sde_ode_fp_sub_eq}
+\end{equation}
+Substituting Eq.~\ref{app:eq:sde_ode_fp_sub_eq} to Eq.~\ref{app:eq:sde_ode_fp}, we arrive at the drift coefficients of the target forward SDE:
+\begin{equation}
+\begin{aligned}
+f_{\text{SDE}} = \vv_t(\vx_t, t) + \frac{ \sigma_t^{2}}{2} \nabla \log p_{t}(\vx)\\
+\end{aligned}
+\label{app:eq:sde_drift}
+\end{equation}
+Hence, we can rewrite the forward SDE in Eq.~\ref{app:eq:generic_sde} as:
+\begin{empheq}{align}
+    \dd \vx_t = \left(\vv_t(\vx_t) + \frac{\sigma_t^2}{2}\nabla\log p_t(\vx_t)\right)\dd t + \sigma_t \dd \vw,
+    \label{app:eq:forward-sde}
+\end{empheq}
+where $\dd\vw$ denotes Wiener process increments, and $\sigma_t$ is the diffusion coefficient controlling the level of stochasticity during sampling.
+
+The relationship between forward and reverse-time SDEs has been established in~\cite{anderson1982reverse, song2020score}. Specifically, if the forward SDE takes the form
+\begin{empheq}{align}
+\dd\vx_t = f(\vx_t, t)\,\dd t + g(t)\,\dd \vw,
+\end{empheq}
+then the corresponding reverse-time SDE is
+\begin{empheq}{align}
+\dd\vx_t = \left[f(\vx_t, t) - g^2(t)\nabla \log p_t(\vx_t)\right]\,\dd t + g(t)\,\dd \overline{\vw}.
+\end{empheq}
+
+Setting $g(t) = \sigma_t$, we obtain the reverse-time SDE corresponding to Eq.~\ref{app:eq:forward-sde} as
+\begin{empheq}{align}
+\dd \vx_t 
+&= \left[\vv_t(\vx_t) + \frac{\sigma_t^2}{2}\nabla\log p_t(\vx_t) - \sigma_t^2\nabla\log p_t(\vx_t)\right] \dd t + \sigma_t \dd \overline{\vw}.
+\end{empheq}
+
+We thus arrive at the final form of the reverse-time SDE:
+\begin{empheq}[box=\fbox]{align}
+    \dd \vx_t = \left(\vv_t(\vx_t) - \frac{\sigma_t^2}{2}\nabla\log p_t(\vx_t)\right)\dd t + \sigma_t \dd \vw,
+    \label{app:eq:sde}
+\end{empheq}
+
+Once the score function $\nabla\log p_t(\vx_t)$ is available, the process can be simulated directly. For flow matching, this score is implicitly linked to the velocity field $\vv_t$.
+
+Specifically, let $\dot{\alpha_t} \equiv \partial\alpha_t/\partial t$. All expectations are over $\vx_0 \sim X_0$ and $\vx_1 \sim \mathcal{N}(0,\mI)$, where $X_0$ is the data distribution.
+
+For the linear interpolation $\vx_t = \alpha_t\vx_0 + \beta_t\vx_1$, we have:
+\begin{equation}
+    p_{t|0}(\vx_t|\vx_0) = \mathcal{N}\left(\vx_t \mid \alpha_t\vx_0, \beta_t^2\mI\right),
+\end{equation}
+yielding the conditional score:
+\begin{equation}
+    \nabla\log p_{t|0}(\vx_t|\vx_0) = -\frac{\vx_t - \alpha_t\vx_0}{\beta_t^2} = -\frac{\vx_1}{\beta_t}.
+\end{equation}
+
+The marginal score becomes:
+\begin{align}
+    \nabla\log p_t(\vx_t) &= \mathbb{E}\left[\nabla\log p_{t|0}(\vx_t|\vx_0) \mid \vx_t\right] \nonumber \\
+    &= -\frac{1}{\beta_t}\mathbb{E}[\vx_1 \mid \vx_t]. \label{app:eq:marginal_score}
+\end{align}
+
+For the velocity field $\vv_t(\vx_t)$, we derive:
+\begin{equation}
+\begin{split}
+\vv_t(\vx) &= \mathbb{E}\left[\dot{\alpha_t} \vx_0 + \dot{\beta_t} \vx_1 \mid \vx_t = \vx \right] \\
+&= \dot{\alpha_t} \mathbb{E}[\vx_0 \mid \vx_t = \vx] + \dot{\beta_t} \mathbb{E}[\vx_1 \mid \vx_t = \vx] \\
+&= \dot{\alpha_t} \mathbb{E}\left[\frac{\vx_t - \beta_t \vx_1}{\alpha_t} \mid \vx_t = \vx \right] + \dot{\beta_t} \mathbb{E}[\vx_1 \mid \vx_t = \vx] \\
+&= \frac{\dot{\alpha_t}}{\alpha_t} \vx - \frac{\dot{\alpha_t} \beta_t}{\alpha_t} \mathbb{E}[\vx_1 \mid \vx_t = \vx] + \dot{\beta_t} \mathbb{E}[\vx_1 \mid \vx_t = \vx] \\
+&= \frac{\dot{\alpha_t}}{\alpha_t} \vx - \left(\dot{\beta_t} \beta_t - \frac{\dot{\alpha_t} \beta_t^2}{\alpha_t}\right) \nabla \log p_t(\vx),
+\end{split}
+\label{app:eq:velocity_score}
+\end{equation}
+
+Substituting $\alpha_t = 1-t$ and $\beta_t = t$ simplifies Equation~\ref{app:eq:velocity_score} to:
+\begin{equation}
+    \vv_t(\vx) = -\frac{\vx}{1-t} - \frac{t}{1-t}\nabla\log p_t(\vx).
+    \label{app:eq:velocity_score_rcflow}
+\end{equation}
+
+Solving for the score yields:
+\begin{equation}
+    \nabla\log p_t(\vx) = -\frac{\vx}{t} - \frac{1-t}{t}\vv_t(\vx).
+    \label{app:eq:score_velocity_rcflow}
+\end{equation}
+
+Substituting Equation~\ref{app:eq:score_velocity_rcflow} into~\ref{app:eq:sde} gives the final SDE:
+\begin{equation}
+    \dd \vx_t = \left[\vv_t(\vx_t) + \frac{\sigma_t^2}{2t}\left(\vx_t + (1-t)\vv_t(\vx_t)\right)\right]\dd t + \sigma_t \dd \vw.
+    \label{app:eq:transformed_sde}
+\end{equation}
+
+Applying Euler-Maruyama discretization yields the update rule:
+\begin{empheq}[box=\fbox]{align}
+    \vx_{t+\Delta t} = \vx_t + \left[\vv_{\theta}(\vx_t,t) + \frac{\sigma_t^2}{2t}\big(\vx_t + (1-t)\vv_{\theta}(\vx_t,t)\big)\right]\Delta t + \sigma_t\sqrt{\Delta t}\,\epsilon,
+    \label{app:eq:update_rule}
+\end{empheq}
+where $\epsilon \sim \mathcal{N}(0,\mI)$ injects stochasticity.

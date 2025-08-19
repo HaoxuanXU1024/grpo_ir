@@ -1,0 +1,276 @@
+\section{Flow-GRPO}\label{sec:method}
+
+% In this section, we present the Flow-GRPO method, a GRPO-inspired algorithm that improves flow models through online RL. We begin by revisiting the core concept of GRPO~\cite{grpo} and recasting it in the context of flow matching. Next, we discuss how to convert the deterministic probability-flow  ODE sampler into a reverse-time SDE with equivalent marginal distribution, thereby introducing stochasticity into the generation process—an essential ingredient for applying GRPO or other RL techniques. Finally, we introduce Denoise Reduction (Section \ref{subsec:fastdenoise}), a practical data sampling method that dramatically accelerates training without degrading performance.
+
+In this section, we present Flow-GRPO, which enhances flow models using online RL. We begin by revisiting the core idea of GRPO~\cite{grpo} and adapting it to flow matching. We then show how to convert the deterministic ODE sampler into a SDE sampler with the same marginal distribution, introducing the stochasticity needed for applying GRPO. Finally, we introduce Denoise Reduction, a practical sampling strategy that significantly speeds up training without sacrificing performance.
+
+% \subsection{GRPO on Flow Matching}
+\paragraph{GRPO on Flow Matching.} RL aims to learn a policy that maximizes the expected cumulative reward. This is often formulated as optimizing a policy $\pi_\theta$ with a regularized objective:
+\begin{equation}
+\label{eq:rl_obj}
+\max_{\theta} \mathbb{E}_{(\vs_0,\va_0,\dots,\vs_T,\va_T) \sim \pi_\theta} \Bigg[ \sum_{t=0}^{T} \Bigg( R(\vs_t, \va_t) - \beta D_{\text{KL}}(\pi_{\theta}( \cdot \mid \vs_t) || \pi_{\text{ref}}( \cdot \mid \vs_t)) \Bigg) \Bigg].
+\end{equation}
+% Among various RL algorithms, GRPO~\cite{grpo} provides a lightweight alternative to policy based methods such as PPO~\cite{ppo}. 
+% Unlike PPO~\cite{ppo}, which requires training a separate value function—normally a separate model of similar size to the policy network, GRPO introduces a group relative formulation to estimate the advantage. 
+% In our setting, we recast the GRPO framework into the context of flow matching.
+
+Unlike other policy based methods like PPO~\cite{ppo}, GRPO~\cite{grpo} provides a lightweight alternative, which introduces a group relative formulation to estimate the advantage.
+
+Recall that the denoising process can be formulated as an MDP, as shown in Section~\ref{subsec:denoising_as_mdp}.   
+Given a prompt \(\vc\), the flow model \(p_{\theta}\) samples a group of \(G\) individual images \(\{\vx^i_0\}_{i=1}^G\) and the corresponding reverse-time trajectories \(\{(\vx^i_T, \vx^i_{T -1}, \cdots, \vx^i_0)\}_{i=1}^G\). Then, the advantage of the \(i\)-th image is calculated by normalizing the group-level rewards as follows:
+\begin{equation}
+\label{eq:grpo_advantage}
+\hat{A}^i_t = \frac{R(\vx^i_0, \vc) - \text{mean}(\{R(\vx^i_0, \vc)\}_{i=1}^G)}{\text{std}(\{R(\vx^i_0, \vc)\}_{i=1}^G)}.
+\end{equation}
+GRPO optimizes the policy model by maximizing the following objective: 
+\begin{equation}
+\mathcal{J}_\text{Flow-GRPO}(\theta) = \mathbb{E}_{\vc\sim \mathcal{C}, \{\vx^i\}_{i=1}^G\sim \pi_{\theta_\text{old}}(\cdot\mid \vc)} f(r,\hat{A},\theta, \varepsilon, \beta),
+\label{eq:grpoloss}
+\end{equation}
+where
+% \begin{equation*}
+% f(r,\hat{A},\theta, \varepsilon, \beta)=
+% \frac{1}{G}\sum_{i=1}^{G} \frac{1}{T}\sum_{t=0}^{T-1} \Bigg( 
+% \min \Big( r^i_t(\theta) \hat{A}^i_t,  
+% \ \text{clip} \Big( r^i_t(\theta), 1 - \varepsilon, 1 + \varepsilon \Big) \hat{A}^i_t \Big)
+% - \beta D_{\text{KL}}(\pi_{\theta} || \pi_{\text{ref}}) 
+% \Bigg),
+% \end{equation*}
+% \begin{equation*}
+%     r^i_t(\theta)=\frac{p_{\theta}(\vx^i_{t-1} \mid \vx^i_t, \vc)}{p_{\theta_{\text{old}}}(\vx^i_{t-1} \mid \vx^i_t, \vc)}.
+% \label{eq:ratio}
+% \end{equation*}
+\begin{align*}
+f(r,\hat{A},\theta, \varepsilon, \beta) &=
+\frac{1}{G}\sum_{i=1}^{G} \frac{1}{T}\sum_{t=0}^{T-1} \Bigg( 
+\min \Big( r^i_t(\theta) \hat{A}^i_t,  
+\ \text{clip} \Big( r^i_t(\theta), 1 - \varepsilon, 1 + \varepsilon \Big) \hat{A}^i_t \Big)
+- \beta D_{\text{KL}}(\pi_{\theta} || \pi_{\text{ref}}) 
+\Bigg), \\
+r^i_t(\theta) &=
+\frac{p_{\theta}(\vx^i_{t-1} \mid \vx^i_t, \vc)}{p_{\theta_{\text{old}}}(\vx^i_{t-1} \mid \vx^i_t, \vc)}.
+\end{align*}
+
+
+% \subsection{ODE-to-SDE}
+% In Equation~\ref{eq:ratio}, we must compute the probability \(p_{\theta}(\vx_{t-1} \mid \vx_t, \vc)\) during the forward sampling process. For diffusion models which is stochastic sampling, this is straightforward—one can directly apply Equation~12 of DDIM~\cite{ddim,ddpo}. However, flow models are defined by a deterministic ODE, so sampling is deterministic: a given final state \(x_T\) uniquely determines the entire sampling trajectory.
+
+% \textbf{ODE-to-SDE}. In Eq.~\ref{eq:grpo_advantage} and Eq.~\ref{eq:ratio}, GRPO relies on a stochastic sampling procedure in order to generate a diverse batch of trajectories for advantage estimation and policy exploration. In the case of diffusion models, the forward process consists of a sequence of random Gaussian noising steps, and its reverse-time sampler is implemented via a Markov chain of Gaussians with progressively decreasing variance—equivalently, an approximate solver for the score-based SDE. Thus, diffusion sampling is naturally stochastic.
+
+% While in the case of probability flow model, as previously discussed in Eq.~\ref{eq:flow_forward}, its forward process can be formulated as a deterministic ODE:
+% \begin{equation}
+%     \dd\vx_t = \vv_t \dd t,
+%     \label{eq:ode}
+% \end{equation}
+% where $\vv_t$ is modeled via the flow matching objective in Eq.~\ref{eq:flow_loss}. A common sampling method is to discretize this ODE (e.g., via the explicit Euler method or a higher-order integrator) yielding a one-to-one mapping between successive time steps. For example, with a fixed step size $\Delta t$, the Euler scheme gives:
+% \begin{equation}
+%     \vx_{t-1} = \vx_t + \Delta t \vv_{\theta}(\vx_t, t, \vc)
+% \end{equation}
+% which produces a single, deterministic trajectory $\{ \vx_T, \vx_{T-1}, \cdots, \vx_0 \}$ given any initial $\vx_T$ and prompt $\vc$.
+\paragraph{From ODE to SDE.}
+GRPO relies on stochastic sampling in Eq.~\ref{eq:grpo_advantage} and Eq.~\ref{eq:grpoloss} to generate diverse trajectories for advantage estimation and exploration. Diffusion models naturally support this: the forward process adds Gaussian noise step by step, and the reverse process approximates a score-based SDE solver via a Markov chain with decreasing variance.
+In contrast, flow matching models use a deterministic ODE for the forward process:
+\begin{equation}
+    \dd\vx_t = \vv_t \dd t,
+    \label{eq:ode}
+\end{equation}
+where $\vv_t$ is learned via the flow matching objective in Eq.~\ref{eq:flow_loss}. A common sampling method is to discretize this ODE, yielding a one-to-one mapping between successive time steps. 
+% For example, with a fixed step size $\Delta t$, the Euler scheme gives:
+% \begin{equation}
+%     \vx_{t-1} = \vx_t + \Delta t \vv_{\theta}(\vx_t, t, \vc)
+% \end{equation}
+% which produces a single, deterministic trajectory $\{ \vx_T, \vx_{T-1}, \cdots, \vx_0 \}$ given any initial $\vx_T$ and prompt $\vc$.
+
+This deterministic approach fails to meet the GRPO policy update requirements in two key ways:
+(1) $r^i_t(\theta)$ in Eq.~\ref{eq:grpoloss} requires computing $p(\vx_{t-1} \mid \vx_t, \vc)$, which becomes computationally expensive under deterministic dynamics due to divergence estimation.
+(2) More importantly, RL depends on exploration. As shown in Section~\ref{sec:exp:noise_scheduler}, reduced randomness greatly lowers training efficiency. Deterministic sampling, with no randomness beyond the initial seed, is especially problematic.
+
+% Because no randomness is injected during sampling, the original ODE sampling algorithm cannot explore alternative paths and thus cannot satisfy GRPO’s requirement for policy updates. 
+% \todo{randomness can be injected by xT, so the key issue is ODE cannot calculate p?}
+% To compute $p_{\theta}(\vx_{t-1} \mid \vx_t, \vc)$, we adapt flow models to stochastic dynamics. While flow models normally follow a deterministic ODE:
+% \begin{equation}
+%     d\vx_t = \vv_t dt,
+%     \label{eq:ode}
+% \end{equation}
+To address this limitation, we convert the deterministic Flow-ODE from Eq.~\ref{eq:ode} into an equivalent SDE that matches the original model's marginal probability density function at all timesteps. We outline the key process here. A detailed proof is provided in Appendix~\ref{app:sec:math}.
+Following \cite{song2020score, albergo2023stochastic,domingo2024adjoint}, we construct a reverse-time SDE formulation that preserves the marginal distribution:
+\begin{equation}
+    \dd \vx_t = \left(\vv_t(\vx_t) - \frac{\sigma_t^2}{2}\nabla\log p_t(\vx_t)\right) \dd t + \sigma_t \dd \vw,
+    \label{eq:sde}
+\end{equation}
+where $\dd \vw$ denotes Wiener process increments and \(\sigma_t\) control the level of stachasticity during generation. For rectified flow, Eq.~\ref{eq:sde} is specified as: 
+\begin{equation}
+    \dd \vx_t = \left[\vv_t(\vx_t) + \frac{\sigma_t^2}{2t}\left(\vx_t + (1-t)\vv_t(\vx_t)\right)\right] \dd t + \sigma_t \dd \vw.
+    \label{eq:transformed_sde}
+\end{equation}
+% For rectified flow, the marginal score has a relation with velocity:
+% \begin{equation}
+%     \nabla\log p_t(\vx) = -\frac{\vx}{t} - \frac{1-t}{t}\vv_t(\vx).
+%     \label{eq:score_velocity_rcflow}
+% \end{equation}
+
+% Substituting Eq.~\ref{eq:score_velocity_rcflow} into Eq.~\ref{eq:sde} gives the final SDE:
+% \begin{equation}
+%     \dd \vx_t = \left[\vv_t(\vx_t) + \frac{\sigma_t^2}{2t}\left(\vx_t + (1-t)\vv_t(\vx_t)\right)\right] \dd t + \sigma_t \dd \vw.
+%     \label{eq:transformed_sde}
+% \end{equation}
+
+
+Applying Euler-Maruyama discretization yields the final update rule:
+\begin{empheq}[box=\fbox]{align}\label{eq:update_rule}
+    \vx_{t+\Delta t} = \vx_t + \left[\vv_{\theta}(\vx_t,t) + \frac{\sigma_t^2}{2t}\big(\vx_t + (1-t)\vv_{\theta}(\vx_t,t)\big)\right]\Delta t + \sigma_t\sqrt{\Delta t}\,\epsilon
+\end{empheq}
+where $\epsilon \sim \mathcal{N}(0,\mI)$ injects stochasticity. We use \(\sigma_t=a\sqrt{\frac{t}{1-t}}\) in this paper, where \(a\) is a scalar hyper-parameter that controls the noise level (See Section~\ref{sec:exp:noise_scheduler} for its impact on performance).
+
+Eq.~\ref{eq:update_rule} reveals that the policy \(\pi_{\theta}(\vx_{t-1} \mid \vx_t, \vc)\) is an isotropic Gaussian distribution. We can easily compute the KL divergence between $\pi_\theta$ and the reference policy $\pi_{\text{ref}}$ in Eq.~\ref{eq:grpoloss} as a closed form: 
+\begin{equation*}
+    D_{\text{KL}}(\pi_{\theta} || \pi_{\text{ref}}) = \frac{\|\overline{\vx}_{t+\Delta t, \theta}-\overline{\vx}_{t+\Delta t, \text{ref}}\|^2}{2\sigma_t^2\Delta t}=\frac{\Delta t}{2} \left(\frac{\sigma_t(1-t)}{2t}+\frac{1}{\sigma_t}\right)^2\|\vv_{\theta}(\vx_t,t)-\vv_{\text{ref}}(\vx_t,t)\|^2
+    \label{eq:gaussian_kl}
+\end{equation*}
+
+% \subsection{Denoising Reduction}\label{subsec:fastdenoise}
+% To produce high-quality images, flow models typically require many denoising steps, making data collection costly for online RL. However, we find that large timesteps are unnecessary during online RL training. 
+% We can use significantly fewer denoising
+% steps during sample generation, while retaining the original denoising steps during inference to get high-quality samples. 
+% Note that we set the timestep $T$ as $10$  in training, while the inference timestep $T$  is set as the original default setting ($T=40$) for SD3.5-M. Our experiments reveals that this approach enables fast training without sacrificing image quality at test time.
+
+\paragraph{Denoising Reduction.}\label{subsec:fastdenoise} To produce high-quality images, flow models typically require many denoising steps, making data collection costly for online RL. However, we find that large timesteps are unnecessary during online RL training. 
+We can use significantly fewer denoising
+steps during sample generation, while retaining the original denoising steps during inference to get high-quality samples. 
+Note that we set the timestep $T$ as $10$  in training, while the inference timestep $T$  is set as the original default setting ($T=40$) for SD3.5-M. Our experiments reveals that this approach enables fast training without sacrificing image quality at test time.
+
+% A key challenge for online RL in flow models is their reliance on many denoising steps to produce high-quality images. To address this, we use fewer denoising steps during training ($T=10$), while keeping the full number of steps during inference ($T=40$ for SD3.5-M). 
+% This approach enables fast training without sacrificing image quality at test time. Interestingly, we find that Flow-GRPO-trained SD3-M achieves significantly better image quality than the baseline under the same 10-step sampling, even matching the baseline’s 40-step performance (see Section~\ref{sec:exp:distill}). This surprising result suggests that Denoising Reduction not only accelerates RL training but also distills a model capable of high-quality generation with fewer inference steps.
+
+% To address this, we use fewer denoising steps during training ($T=10$), while keeping the full number of steps during inference ($T=40$ for SD3.5-M). This approach enables fast training without sacrificing image quality at test time.
+% % Our experiments reveals that we can obtain both fast sampling in training and high-quality samples in inference simultaneously. 
+% Interestingly, Flow-GRPO-trained SD3-M achieves significantly better image quality than the baseline under the same 10 timestep sampling at test time, comparable even to the baseline's 40 timestep results (see Section~\ref{sec:exp:distill}). This suggests that Denoising Reduction not only speeds up rl training but also effectively distills a model that performs well with fewer inference steps.
+% By contrast, flow‑model pre‑training usually takes about 1,000 steps—far more than the number required during testing.
+
+% \subsection{Reward Hack}
+
+% \paragraph{KL Divergence.}
+
+% \paragraph{Inference only high noise timesteps.}
+
+% \paragraph{Add image prompt quailty reward.}
+
+% To obtain a dense reward function, we leverage the duality between the sparse preference reward function and the dense language model probability (Eq.~\ref{eq:duality}). By explicitly factorizing the log-probability of a complete response $\rvy$ under the language models, we obtain a sum-of-rewards style formulation for Eq.~\ref{eq:duality}:
+% \begin{equation}\label{eq:duality-sparse-to-dense}
+%     r(\rvx, \rvy) = \beta \left(\sum_{t=1}^{|\rvy|} \log \frac{\pi^*(\ervy_t \mid \rvx, \rvy_{<t})}{\pi_{\text{ref}}(\ervy_t \mid \rvx, \rvy_{<t})} \right) + \beta \log Z(\rvx),
+% \end{equation}
+% where $\rvy_{<t}$ denotes the response tokens from $1$ to $t-1$,
+% % (we slightly overload $\rvy_{t<1}$ to represent an empty sequence $\varnothing$)
+% and the last response token $\ervy_{|\rvy|}$ is the \verb|EOS| token.
+% Combining Eq.~\ref{eq:obj} and~\ref{eq:duality-sparse-to-dense}, we rewrite the original objective with a per-token reward function:
+% \begin{subequations}
+% \label{eq:obj-dense}
+% % \begin{align}
+% \begin{empheq}[box=\fbox]{align}
+%     \argmax_{\pi} \quad & \mathbb{E}_{\rvx \sim p(\rvx), \rvy \sim \pi(\rvy \mid \rvx)}\left[\sum_{t=1}^{|\rvy|} \log \frac{\pi^*(\ervy_t \mid \rvx, \rvy_{<t})}{\pi_{\text{ref}}(\ervy_t \mid \rvx, \rvy_{<t})}\right] \label{eq:obj-dense-a} \\
+%     \text{s.t.} \quad & \mathbb{E}_{\rvx \sim p(\rvx)} \left[\mathbb{D}_{\mathrm{KL}}\left(\pi(\rvy \mid \rvx) \,\|\, \pi_{\mathrm{base}}(\rvy \mid \rvx)\right)\right] \leq \epsilon \label{eq:obj-dense-b},
+% % \end{align}
+% \end{empheq}
+% \end{subequations}
+% where $\beta$ and $Z(\rvx)$ are omitted as they do not influence the optimal solution.
+% It is important to note that the reference model that parametrizes the reward function ($\pi_{\mathrm{ref}}$) (Eq.~\ref{eq:obj-dense-a}) and the reference model that constrains the test-time search space ($\pi_{\mathrm{base}}$) (Eq.~\ref{eq:obj-dense-b}) can be different. \textbf{Practically, decoupling the reference models is useful as it allows using a tuned and untuned language model pair - namely ($\bm{\pi^*}$, $\bm{\pi}_{\text{ref}}$) - to steer the decoding of any base language model $\bm{\pi}_{\text{base}}$ without retraining}.
+% %  (e.g., they can differ in parameter counts)
+
+% % Setting aside the KL constraint (Eq.~\ref{eq:obj-dense-b}) for now, we can apply existing search algorithms like beam search~\citep{janner2021offline, rafailov2024r} to optimize Eq.~\ref{eq:obj-dense-a}.
+% % % Beam search, typically used to maximize a distribution $\log p(\rvy \mid \rvx)$, can be easily adapted to maximize the difference between distributions (i.e., cumulative reward per Eq~\ref{eq:obj-dense-a}).
+% % % it is tempting to argue that 
+% % Beam search is criticized for leading to myopic solutions~\cite{janner2021offline}, as it greedily prioritizes states $(\rvx, \rvy')$ ($\rvy'$ is incomplete)\footnote{$\rvy$ denotes a complete response, while $\rvy'$ denotes a response that can be either incomplete or complete.} of high intermediate return $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$, which may be poorly correlated with the overall return we care about. Although this criticism holds for most MDPs, appealing to the token-level MDP~\citep{rafailov2024r}, we argue that in this case, the intermediate return is a reliable indicator of the long-term value and beam search is not myopic:
+
+% % Setting aside the KL constraint (Eq.~\ref{eq:obj-dense-b}) for now, we can apply existing search algorithms like beam search~\citep{janner2021offline, rafailov2024r} to optimize Eq.~\ref{eq:obj-dense-a}.
+% % However, beam search is usually criticized for leading to myopic solutions~\cite{janner2021offline}, as it greedily prioritizes states $(\rvx, \rvy')$ ($\rvy'$ is incomplete)\footnote{$\rvy$ denotes a complete response, while $\rvy'$ denotes a response that can be either incomplete or complete.} of high cumulative reward $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$ midway through generation, which may be poorly correlated with the overall return we care about. Although this criticism holds for most MDPs, appealing to the token-level MDP~\citep{rafailov2024r}, we argue that in this case, the cumulative reward mid-generation is a reliable indicator of the long-term value and beam search is not myopic:
+
+% Setting aside the KL constraint (Eq.~\ref{eq:obj-dense-b}) for now, we can apply existing search algorithms like beam search~\citep{janner2021offline, rafailov2024r} to optimize Eq.~\ref{eq:obj-dense-a}. Beam search is often criticized for leading to myopic solutions~\cite{janner2021offline}, as it tends to greedily prioritize states $(\rvx, \rvy')$ ($\rvy'$ is incomplete)\footnote{$\rvy$ denotes a complete response, while $\rvy'$ denotes a response that can be either incomplete or complete.} with high cumulative reward $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$ midway through generation, which is generally viewed as poorly correlated with the overall return we care about. While this criticism is valid for most MDPs, we argue that in the token-level MDP~\citep{rafailov2024r} of our case, the cumulative reward mid-generation is actually a reliable indicator of the long-term value, making beam search less myopic.
+
+% % Setting aside the KL constraint (Eq.~\ref{eq:obj-dense-b}) for now, we can apply existing search algorithms like beam search~\citep{janner2021offline, rafailov2024r} to optimize Eq.~\ref{eq:obj-dense-a}. Despite its common criticism for leading to myopic solutions~\cite{janner2021offline}, since it tends to greedily prioritize states $(\rvx, \rvy')$ ($\rvy'$ is incomplete)\footnote{$\rvy$ denotes a complete response, while $\rvy'$ denotes a response that can be either incomplete or complete.} with high cumulative reward $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$ midway through generation, we argue that in the token-level MDP~\citep{rafailov2024r} of our case, this cumulative reward is actually a reliable indicator of long-term value, making beam search less myopic.
+% % and there \textit{seems} no guarantee that high partial cumulative reward, in expectation, will translate into high overall returns 
+% % $r(\rvx, \rvy) = \log \pi^*(\rvy \mid \rvx) - \log \pi_{\text{ref}}(\rvy \mid \rvx)$.
+% % \textit{greedy selection based on partial evaluations under language models probability does not lead to myopic decisions}.
+
+% % Based on prior works~\citep{janner2021offline}, it is tempting to claim that repurposing beam search for reward maximization may result in myopic decisions, even with dense rewards. This argument is based on the fact that beam search is a greedy heuristic that requires evaluating states midway through generation $(\rvx, \rvy')$ ($y'_{|\rvy'|} \neq$ \verb|EOS|) by partial cumulative reward $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$
+% % and there \textit{seems} no guarantee that high partial cumulative reward, in expectation, will translate into high overall returns 
+% % $\log \pi^*(\rvy \mid \rvx) - \log \pi_{\text{ref}}(\rvy \mid \rvx)$.
+
+
+% \paragraph{Cumulative reward under language models as a value function~\cite{rafailov2024r}.}
+% % In Appendix~\ref{app:sec:math}, we show that (inspired heavily  by~\cite{rafailov2024r}):
+% Appendix~\ref{app:sec:math} shows that:
+% \begin{equation}\label{eq:partial-eval}
+% \log \frac{\pi^*(\rvy' \mid \rvx)}{ \pi_{\text{ref}}(\rvy' \mid \rvx)} \propto
+%  \begin{cases}
+% % -V^*(\rvx) + V^*(\rvx, \rvy'),  & \text { if } \ervy'_{|\rvy'|} \neq \texttt{EOS} \text{ ($\rvy'$ is incomplete)} \\ 
+% % -V^*(\rvx) + r(\rvx, \rvy'),  & \text { if } \ervy'_{|\rvy'|} = \texttt{EOS} \text{ ($\rvy'$ is complete)}
+% -V^*(\rvx) + V^*(\rvx, \rvy')  & \text { if  $\rvy'$ is incomplete} \\ 
+% -V^*(\rvx) + r(\rvx, \rvy')  & \text { if  $\rvy'$ is complete},
+% \end{cases}
+% \end{equation}
+% % where $V^*(\rvx, \rvy')$ denotes the value function in the original KL-constrained sparse reward setting. 
+% % In other words, $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$ is an \textit{approximate} indicator of how good the state is in the long run, positively correlated with the expected $r(\rvx, \rvy)$ under the optimal $\pi^*$.  
+% % Therefore, continuing from the state $(\rvx, \rvy')$ of high partial return $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$ is very likely (though not guaranteed) to generate a complete response $\rvy$ with high overall return $r(\rvx, \rvy)$.
+% where $V^*(\rvx, \rvy')$ denotes the value function, predicting the expected terminal reward under the optimal $\pi^*$ in the original KL-constrained sparse reward problem. Although $V^*(\rvx, \rvy')$ is not necessarily achievable by the searched policy, it approximates how good the state $(\rvx, \rvy')$ is in the long run. In other words, continuing from the state $(\rvx, \rvy')$ of high cumulative reward $\log \pi^*(\rvy' \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \mid \rvx)$ is likely to generate a complete response $\rvy$ with high overall return $\log \pi^*(\rvy \mid \rvx) - \log \pi_{\text{ref}}(\rvy \mid \rvx)$.
+
+% % starting from the state $(\rvx, \rvy')$ to the end of the generation 
+% % under the optimal language model ($\pi^*$ per Eq.~\ref{eq:lg-obj}).
+% % Although $V^*$ is not a value function for the searched policy $\pi$, it is still a good indicator of how good the state is \textit{in the long run}. 
+
+% \begin{figure}[t]
+% \centering
+% \includegraphics[width=.9\textwidth, trim={2.5cm 2.2cm 1.5cm 2.3cm},clip]{src/cbs.pdf}
+% \caption{Illustration of Chunk-level Beam Search with $W,K=2,2$.}
+% \label{fig:cbs_illustration}
+% \end{figure}
+
+% \subsection{Chunk-level Beam Search (CBS)}\label{subsec:cbs}
+% After analyzing the feasibility of optimizing Eq.~\ref{eq:obj-dense-a} with greedy search algorithms (e.g., beam search), we introduce a practical beam search variant that optimizes the dense reward objective (Eq.~\ref{eq:obj-dense-a}) while ensuring the KL-constraint from $\pi_{\text{base}}$ (Eq.~\ref{eq:obj-dense-b}).
+
+% The core algorithm providing the foundation of our method, Chunk-level Beam Search (CBS), is detailed in Algorithm~\ref{alg:cbs} and illustrated in Figure~\ref{fig:cbs_illustration}.
+% The key insight is that our beam search operates at the level of chunk. The search starts at the prompt and always maintains a hypothesis set $\mathcal{H} = \{ (\rvx, \rvy')_i \}^{W}_{i=1}$ of $W$ states.
+% For each state $(\rvx, \rvy')$ in $\mathcal{H}$, CBS samples $K$ continuation chunks $\rvy_L$ of $L$ tokens from $\pi_{\text{base}}$. This results in $WK$ successor states.
+% % $\{ (\rvx, \rvy' \circ \rvy_L)_i \}^{W\cdot K}_{i=1}$. 
+% Among these successors, only the top-$W$ successors with the highest partial return 
+% $\log \pi^*(\rvy' \circ \rvy_L \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \circ \rvy_L \mid \rvx)$ are stored in $\mathcal{H}$ and expanded further. Finally, the terminal state $(\rvx, \rvy)$ with the highest intermediate return $\log \pi^*(\rvy \mid \rvx) - \log \pi_{\text{ref}}(\rvy \mid \rvx)$ is selected, from which the complete response $\rvy$ is extracted.
+% Notably, if the model to steer $\pi_{\text{base}}$ has a \textit{different vocabulary} from the tuned and unturned models $(\pi^*, \pi_{\text{ref}})$, we should first decode the sampled tokens into natural language using $\pi_{\text{base}}$'s vocabulary and then re-encode using ($\pi^*, \pi_{\text{ref}}$)'s vocabulary for evaluation.
+
+% \definecolor{lightgrey}{gray}{0.5}
+% \renewcommand{\algorithmiccomment}[1]{\hfill\textcolor{lightgrey}{// #1}}
+% \begin{algorithm}
+% \caption{Chunk-level Beam Search (CBS)}
+% \label{alg:cbs}
+% \begin{algorithmic}[1]
+% \setlength{\itemsep}{1.5pt} % Increase vertical space between items
+% \State \textbf{Input:} prompt $\rvx$, beam width $W$, successors per state $K$, chunk length $L$, 
+% \State \hspace{1cm} model to steer $\pi_{\text{base}}$, tuned model $\pi^*$, and untuned model $\pi_{\text{ref}}$.
+% \State \textbf{Output:} optimal terminal state $(\rvx, \rvy)$
+% \State Initialize $\mathcal{H} = \{ (\rvx, \rvy'=\varnothing)_i \}^{W}_{i=1}$ 
+
+% \While{$\exists (\rvx, \rvy') \in \mathcal{H}$ such that $\rvy'$ is incomplete}
+%     \State Initialize $\mathcal{C} = \{ \}$
+%     \For{each $(\rvx, \rvy') \in \mathcal{H}$}
+%         % \State $\mathcal{Y} \gets \{ \rvy_L \mid \rvy_L \sim \pi_{\text{base}}( \cdot \mid \rvx, \rvy') \}^K_{i=1}$ \Comment{$\rvy_L = \varnothing$ if $\rvy'$ is complete}
+%         \State $\mathcal{Y} \gets \{(\rvy_L)_i \}^K_{i=1} \overset{\text{i.i.d.}}{\sim} \pi_{\text{base}}( \cdot \mid \rvx, \rvy')$ \Comment{$\rvy_L = \varnothing$ if $\rvy'$ is complete}
+%         \State $\mathcal{C} \gets \mathcal{C} \cup \{ (\rvx, \rvy' \circ \rvy_L) \mid \rvy_L \in \mathcal{Y} \}$
+%     \EndFor
+%     \State $\mathcal{H} \gets \text{Top-}W_{(\rvx, \rvy' \circ \rvy_L) \in \mathcal{C}} (\log \pi^*(\rvy' \circ \rvy_L \mid \rvx) - \log \pi_{\text{ref}}(\rvy' \circ \rvy_L \mid \rvx))$
+% \EndWhile
+
+% \State \Return $\argmax_{(\rvx, \rvy) \in \mathcal{H}} (\log \pi^*(\rvy \mid \rvx) - \log \pi_{\text{ref}}(\rvy \mid \rvx))$
+% \end{algorithmic}
+
+% \end{algorithm}
+
+% \textbf{CBS is a unified framework that encompasses several search-based algorithms}: (1) CBS with $W=1$, $K=N$, $L=\infty$ (i.e., infinite chunk length) is equivalent to BoN sampling with $\log \pi^*(\rvy \mid \rvx) - \log \pi_{\text{ref}}(\rvy \mid \rvx)$ as the scoring function, and
+% (2) CBS with $K=\infty$, $L=1$ (i.e., exploring all possible next tokens from the vocabulary) is equivalent to vanilla token-level beam search.
+% \textit{However, we always ensure finite chunk length and limited successor exploration via sampling to achieve the best of both worlds}:
+% (1) Using a finite chunk length allows CBS to prune bad states during generation, enhancing steerability more efficiently compared to BoN.
+% (2) Sampling from $\pi_{\text{base}}$ with limited successor exploration implicitly enforces the KL-constraint from $\pi_{\text{base}}$ (Eq.~\ref{eq:obj-dense-b}); otherwise, integrating the KL-constraint into the objective (Eq.~\ref{eq:obj-dense-a}) would be necessary for token-level search, but this can be challenging, especially when vocabularies of models differ or with black-box language base models $\pi_{\text{base}}$ whose log-probabilities are inaccessible.
+% % \textbf{In addition, it can be beneficial to keep more than one promising state $\bm{W > 1}$} because the partial return only approximately correlates with the overall return (Section~\ref{subsec:lm-as-r}). While the partial return provides useful long-term guidance, we can still not strictly guarantee achieving the global optima by following the best local estimates.
+
+% \textbf{Computation costs.} In practice, CBS samples $WK$ continuation chunks in parallel from the frozen base model $\pi_{\text{base}}$ and prune states by calling tuned and untuned model pair $(\pi^*, \pi_{\text{ref}})$ every $L$ tokens. 
+% Larger $WK$ and smaller $L$ enhance steerability at the cost of increased computations. Note that high steerability, while beneficial, is not always ideal as it may lead to large KL deviation and over-optimization~\cite{gao2023scaling}.
+
+% \subsection{Application: Model Up-Scaling and Weak-to-Strong Generalization}
+% The most practical use of CBS occurs when the tuned and untuned models, $(\pi^*, \pi_{\text{ref}})$, are smaller than the model to steer, $\pi_{\text{base}}$. (1) First, this instance serves as a model up-scaling strategy, directly tuning a small model $\pi_{\text{ref}} \rightarrow \pi^*$, by which the large model decoding can then be guided, to achieve similar outcomes as directly tuning the large model. (2) Second, since the small models $(\pi^*, \pi_{\text{ref}})$ are usually weaker than the large model to steer $\pi_{\text{base}}$, this instance also exemplifies weak-to-strong generalization~\citep{burns2023weak}, enhancing the strong model with only weak test-time guidance. We refer to this instance of CBS as weak-to-strong search, which is the main focus of our study.

@@ -59,7 +59,23 @@ def compute_psnr_ssim(recoverd, clean):
 
     for i in range(recoverd.shape[0]):
         psnr += peak_signal_noise_ratio(clean[i], recoverd[i], data_range=1)
-        ssim += structural_similarity(clean[i], recoverd[i], data_range=1, multichannel=True)
+        # 自适应 SSIM 的窗口大小与 skimage 新旧接口
+        h_i, w_i = clean[i].shape[:2]
+        min_side = min(h_i, w_i)
+        if min_side < 3:
+            # 尺寸过小无法计算 SSIM，记为 0 避免报错
+            ssim_i = 0.0
+        else:
+            ws = min(7, min_side)
+            if ws % 2 == 0:
+                ws = max(ws - 1, 3)
+            try:
+                # skimage>=0.19 使用 channel_axis 参数
+                ssim_i = structural_similarity(clean[i], recoverd[i], data_range=1, channel_axis=-1, win_size=ws)
+            except TypeError:
+                # 兼容旧版使用 multichannel 参数
+                ssim_i = structural_similarity(clean[i], recoverd[i], data_range=1, multichannel=True, win_size=ws)
+        ssim += ssim_i
 
     return psnr / recoverd.shape[0], ssim / recoverd.shape[0], recoverd.shape[0]
 

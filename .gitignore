@@ -158,3 +158,78 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# 机器学习和深度学习相关大文件
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.hdf5
+*.bin
+*.safetensors
+*.pkl
+*.pickle
+
+# 数据文件夹
+data/
+dataset/
+datasets/
+Data/
+Dataset/
+Datasets/
+data_dir/
+
+# 模型权重文件夹
+ckpt/
+checkpoints/
+weights/
+models/
+
+# 结果文件夹
+results/
+outputs/
+output/
+AdaIR_results/
+
+# 训练日志和实验记录
+*.log
+logs/
+wandb/
+tb_logs/
+tensorboard/
+
+# 大的压缩文件
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# 图片和视频文件
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.gif
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.pdf
+
+# 临时文件
+nohup.out
+ziLUTbrw
+*.tmp
+*.temp
+
+# 改进的模型文件夹
+grpo_improved/
+
+# IDE 和编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

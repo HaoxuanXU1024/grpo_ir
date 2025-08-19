@@ -28,6 +28,41 @@ Example Usage: If we only want to train on deraining and dehazing:
 python train.py --de_type derain dehaze
 ```
 
+### GRPO Fine-tuning (optional)
+
+We provide a minimal GRPO fine-tuning switch that turns the frequency gating inside `FreModule` into a low-dimensional stochastic policy. Enable with:
+```
+python train.py --grpo --grpo_group 4 --grpo_lambda_sup 0.1 --grpo_lambda_consistency 0.05
+```
+When `--grpo` is on, the trainer samples G stochastic actions per input (group sampling) and optimizes a GRPO surrogate objective with advantages computed within the group, along with small stabilization losses.
+
+#### Finetune on worst-case lists with LoRA (small data, low memory)
+
+1) Prepare worst lists from training evaluation (CSV) using `select_worst_from_csv.py` (see `AdaIR_results/train_eval/`):
+```
+python select_worst_from_csv.py --csv path/to/*.csv --out_dir AdaIR_results/train_eval/ --percent 0.30 --min_count 100 --max_count 5000
+```
+
+2) Run GRPO finetune using only the worst lists and LoRA:
+```
+python train.py \
+  --resume_ckpt /data2/haoxuan/AdaIR/ckpt/adair5d.ckpt \
+  --grpo --grpo_group 2 --batch_size 1 \
+  --finetune_worst \
+  --worst_derain AdaIR_results/train_eval/train_derain_worst.txt \
+  --worst_dehaze AdaIR_results/train_eval/train_dehaze_worst.txt \
+  --worst_deblur AdaIR_results/train_eval/train_deblur_worst.txt \
+  --worst_enhance AdaIR_results/train_eval/train_enhance_worst.txt \
+  --worst_denoise AdaIR_results/train_eval/train_denoise_worst_merged.txt \
+  --lora --lora_targets attn,cross_attn --lora_r 4 --lora_alpha 4 \
+  --train_policy_only \
+  --grpo_w_psnr 0.4 --grpo_w_ssim 0.3 --grpo_w_lpips 0.3
+```
+
+Notes:
+- `--train_policy_only` trains only GRPO policy heads and LoRA params, keeping backbone frozen for stability and low memory.
+- Reduce `--grpo_group` or temporarily set `--grpo_w_lpips 0.0` if OOM.
+
 ## Testing
 
 After preparing the testing data in ```test/``` directory, place the mode checkpoint file in the ```ckpt``` directory. The pre-trained model can be downloaded [here](https://drive.google.com/drive/folders/1x2LN4kWkO3S65jJlH-1INUFiYt8KFzPH?usp=sharing). To perform the evaluation, use

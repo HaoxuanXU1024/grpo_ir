@@ -310,11 +310,26 @@ class FreModule(nn.Module):
             nn.Conv2d(dim//8, 2, 1, bias=False),
         )
 
-    def forward(self, x, y):
+        # Policy heads for GRPO (low-dimensional actions)
+        # 1) Threshold ratios (r_h, r_w) in (0,1) via Beta(alpha, beta)
+        self.policy_rate = nn.Sequential(
+            nn.Conv2d(dim, dim // 8, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(dim // 8, 4, 1, bias=True),  # [alpha_h, beta_h, alpha_w, beta_w]
+        )
+        # 2) Fusion scalars for para1/para2: g1, g2 in (0,1) via Beta
+        self.policy_fuse = nn.Sequential(
+            nn.Conv2d(dim, dim // 8, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(dim // 8, 4, 1, bias=True),  # [alpha_1, beta_1, alpha_2, beta_2]
+        )
+        self.enable_temp_action = False  # optional, can be toggled if needed
+
+    def forward(self, x, y, stochastic: bool = False, collector=None):
         _, _, H, W = y.size()
         x = F.interpolate(x, (H,W), mode='bilinear')
         
-        high_feature, low_feature = self.fft(x) 
+        high_feature, low_feature, log_prob = self.fft(x, stochastic=stochastic)
 
         high_feature = self.channel_cross_l(high_feature, y)
         low_feature = self.channel_cross_h(low_feature, y)
@@ -322,7 +337,41 @@ class FreModule(nn.Module):
         agg = self.frequency_refine(low_feature, high_feature)
         out = self.channel_cross_agg(y, agg)
 
-        return out * self.para1 + y * self.para2
+        # Optionally apply stochastic fusion scalars for para1/para2
+        # Use pooled y to drive the fusion policy head
+        fuse_lp = None
+        if stochastic:
+            y_pool = F.adaptive_avg_pool2d(y, 1)
+            raw = self.policy_fuse(y_pool)
+            raw = F.softplus(raw) + 1e-4
+            a1 = raw[:, 0, 0, 0]
+            b1 = raw[:, 1, 0, 0]
+            a2 = raw[:, 2, 0, 0]
+            b2 = raw[:, 3, 0, 0]
+            # Sample g1, g2 ~ Beta with 1D params
+            from torch.distributions import Beta
+            dist1 = Beta(a1, b1)
+            dist2 = Beta(a2, b2)
+            g1_flat = dist1.rsample()
+            g2_flat = dist2.rsample()
+            g1 = g1_flat.view(-1, 1, 1, 1)
+            g2 = g2_flat.view(-1, 1, 1, 1)
+            fuse_lp = dist1.log_prob(g1_flat) + dist2.log_prob(g2_flat)  # [B]
+        else:
+            # Deterministic mean of Beta: alpha / (alpha + beta) => use 1.0 (no change)
+            g1 = torch.ones(y.size(0), 1, 1, 1, device=y.device, dtype=y.dtype)
+            g2 = torch.ones(y.size(0), 1, 1, 1, device=y.device, dtype=y.dtype)
+
+        out = out * (self.para1 * g1) + y * (self.para2 * g2)
+
+        if stochastic and collector is not None:
+            # aggregate log-probabilities
+            total_lp = log_prob
+            if fuse_lp is not None:
+                total_lp = total_lp + fuse_lp
+            collector.append(total_lp)
+
+        return out
 
     def shift(self, x):
         '''shift FFT feature map to center'''
@@ -334,13 +383,33 @@ class FreModule(nn.Module):
         b, c, h ,w = x.shape
         return torch.roll(x, shifts=(-int(h/2), -int(w/2)), dims=(2,3))
 
-    def fft(self, x, n=128):
+    def fft(self, x, n=128, stochastic: bool = False):
         """obtain high/low-frequency features from input"""
         x = self.conv1(x)
         mask = torch.zeros(x.shape).to(x.device)
         h, w = x.shape[-2:]
-        threshold = F.adaptive_avg_pool2d(x, 1)
-        threshold = self.rate_conv(threshold).sigmoid()
+        pooled = F.adaptive_avg_pool2d(x, 1)
+
+        if stochastic:
+            # Sample (r_h, r_w) via Beta with safe shapes
+            raw = self.policy_rate(pooled)  # [B,4,1,1]
+            raw = F.softplus(raw) + 1e-4
+            a_h = raw[:, 0, 0, 0]
+            b_h = raw[:, 1, 0, 0]
+            a_w = raw[:, 2, 0, 0]
+            b_w = raw[:, 3, 0, 0]
+            from torch.distributions import Beta
+            dist_h = Beta(a_h, b_h)
+            dist_w = Beta(a_w, b_w)
+            r_h_flat = dist_h.rsample()  # [B]
+            r_w_flat = dist_w.rsample()  # [B]
+            r_h = r_h_flat.view(-1, 1, 1, 1)
+            r_w = r_w_flat.view(-1, 1, 1, 1)
+            threshold = torch.cat([r_h, r_w], dim=1)
+            log_prob = dist_h.log_prob(r_h_flat) + dist_w.log_prob(r_w_flat)  # [B]
+        else:
+            threshold = self.rate_conv(pooled).sigmoid()
+            log_prob = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
 
         for i in range(mask.shape[0]):
             h_ = (h//n * threshold[i,0,:,:]).int()
@@ -363,7 +432,7 @@ class FreModule(nn.Module):
         low = torch.fft.ifft2(low, norm='forward', dim=(-2,-1))
         low = torch.abs(low)
 
-        return high, low
+        return high, low, log_prob
 
 
 ##########################################################################
@@ -423,7 +492,7 @@ class AdaIR(nn.Module):
                     
         self.output = nn.Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
 
-    def forward(self, inp_img,noise_emb = None):
+    def forward(self, inp_img,noise_emb = None, stochastic: bool = False):
 
         inp_enc_level1 = self.patch_embed(inp_img)
 
@@ -440,8 +509,9 @@ class AdaIR(nn.Module):
         inp_enc_level4 = self.down3_4(out_enc_level3)        
         latent = self.latent(inp_enc_level4) 
 
+        log_probs = [] if stochastic else None
         if self.decoder:
-            latent = self.fre1(inp_img, latent)
+            latent = self.fre1(inp_img, latent, stochastic=stochastic, collector=log_probs)
       
         inp_dec_level3 = self.up4_3(latent)
 
@@ -451,7 +521,7 @@ class AdaIR(nn.Module):
         out_dec_level3 = self.decoder_level3(inp_dec_level3) 
 
         if self.decoder:
-            out_dec_level3 = self.fre2(inp_img, out_dec_level3)
+            out_dec_level3 = self.fre2(inp_img, out_dec_level3, stochastic=stochastic, collector=log_probs)
 
         inp_dec_level2 = self.up3_2(out_dec_level3)
         inp_dec_level2 = torch.cat([inp_dec_level2, out_enc_level2], 1)
@@ -460,7 +530,7 @@ class AdaIR(nn.Module):
         out_dec_level2 = self.decoder_level2(inp_dec_level2)
 
         if self.decoder:
-            out_dec_level2 = self.fre3(inp_img, out_dec_level2)
+            out_dec_level2 = self.fre3(inp_img, out_dec_level2, stochastic=stochastic, collector=log_probs)
 
         inp_dec_level1 = self.up2_1(out_dec_level2)
         inp_dec_level1 = torch.cat([inp_dec_level1, out_enc_level1], 1)
@@ -471,5 +541,13 @@ class AdaIR(nn.Module):
 
         out_dec_level1 = self.output(out_dec_level1) + inp_img
 
+        if stochastic:
+            if len(log_probs) > 0:
+                # log_probs is a list of [B] tensors; sum across modules
+                stacked = torch.stack(log_probs)  # [M, B]
+                total_lp = stacked.sum(dim=0)     # [B]
+            else:
+                total_lp = torch.zeros(inp_img.size(0), device=inp_img.device, dtype=inp_img.dtype)
+            return out_dec_level1, total_lp
         return out_dec_level1
     
