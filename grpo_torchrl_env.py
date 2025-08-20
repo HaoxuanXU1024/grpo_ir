@@ -5,10 +5,10 @@ TorchRL Environment for GRPO Training on AdaIR
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from typing import Optional, Dict, Any
 from tensordict import TensorDict
-import torch.nn.functional as F
 
 from net.model import AdaIR
 from utils.val_utils import compute_psnr_ssim
@@ -78,12 +78,24 @@ class AdaIRGRPOEnv:
     def _run_adair_with_policy(self, degraded: torch.Tensor, freq_params: torch.Tensor) -> torch.Tensor:
         """使用策略参数运行AdaIR模型 - 真正的参数注入版本"""
         
+        # 确保输入在正确的设备上
+        degraded = degraded.to(self.device)
+        
+        # 处理DDP包装的模型
+        actual_model = self.adair_model
+        if hasattr(self.adair_model, 'module'):
+            # 如果模型被DDP包装，使用.module访问实际模型
+            actual_model = self.adair_model.module
+        
+        # 确保模型在正确的设备上
+        actual_model = actual_model.to(self.device)
+        
         # 注入策略参数到FreModule
-        self._inject_policy_to_fremodules(freq_params)
+        self._inject_policy_to_fremodules(freq_params, actual_model)
         
         with torch.no_grad():
             # 使用stochastic=True模式，这样FreModule会使用我们注入的参数
-            result = self.adair_model(degraded, stochastic=True)
+            result = actual_model(degraded, stochastic=True)
             if isinstance(result, tuple):
                 restored = result[0]  # (output, log_prob)
             else:
@@ -91,11 +103,11 @@ class AdaIRGRPOEnv:
             
         return restored
     
-    def _inject_policy_to_fremodules(self, freq_params: torch.Tensor):
+    def _inject_policy_to_fremodules(self, freq_params: torch.Tensor, model):
         """将策略参数注入到AdaIR的FreModule中"""
         
         # 获取3个FreModule
-        fre_modules = [self.adair_model.fre1, self.adair_model.fre2, self.adair_model.fre3]
+        fre_modules = [model.fre1, model.fre2, model.fre3]
         
         for i, fre_module in enumerate(fre_modules):
             params = freq_params[:, i, :]  # [B, 8]
@@ -107,6 +119,10 @@ class AdaIRGRPOEnv:
     def _override_policy_head(self, fre_module, params):
         """临时覆盖FreModule的策略头输出"""
         
+        # 确保参数在正确的设备上（与FreModule相同的设备）
+        device = next(fre_module.parameters()).device
+        params = params.to(device)
+        
         # 分离rate和fuse参数
         rate_params = params[:, :4]   # [B, 4] - alpha_h, beta_h, alpha_w, beta_w  
         fuse_params = params[:, 4:8]  # [B, 4] - alpha_1, beta_1, alpha_2, beta_2
@@ -115,16 +131,18 @@ class AdaIRGRPOEnv:
         def temp_rate_forward(x):
             # x是pooled特征 [B, dim, 1, 1]
             batch_size = x.size(0)
-            # 直接返回我们的策略参数，确保形状正确
-            output = rate_params.view(batch_size, 4, 1, 1)
+            device = x.device  # 使用输入的设备
+            # 直接返回我们的策略参数，确保形状和设备正确
+            output = rate_params.to(device).view(batch_size, 4, 1, 1)
             # 应用softplus确保参数为正
             return F.softplus(output) + 1e-4
         
         def temp_fuse_forward(x):
             # x是pooled特征 [B, dim, 1, 1] 
             batch_size = x.size(0)
-            # 直接返回我们的融合参数
-            output = fuse_params.view(batch_size, 4, 1, 1)
+            device = x.device  # 使用输入的设备
+            # 直接返回我们的融合参数，确保设备正确
+            output = fuse_params.to(device).view(batch_size, 4, 1, 1)
             return F.softplus(output) + 1e-4
         
         # 临时替换forward方法
@@ -136,7 +154,12 @@ class AdaIRGRPOEnv:
     
     def _restore_policy_heads(self):
         """恢复原始的策略头"""
-        fre_modules = [self.adair_model.fre1, self.adair_model.fre2, self.adair_model.fre3]
+        # 处理DDP包装的模型
+        actual_model = self.adair_model
+        if hasattr(self.adair_model, 'module'):
+            actual_model = self.adair_model.module
+            
+        fre_modules = [actual_model.fre1, actual_model.fre2, actual_model.fre3]
         
         for fre_module in fre_modules:
             if hasattr(fre_module.policy_rate, '_temp_forward'):
@@ -149,6 +172,14 @@ class AdaIRGRPOEnv:
     
     def _compute_reward(self, restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
         """计算多指标组合奖励"""
+        
+        # 确保输入在正确的设备上
+        restored = restored.to(self.device)
+        clean = clean.to(self.device)
+        
+        # 确保指标计算器在正确的设备上
+        self.ssim_metric = self.ssim_metric.to(self.device)
+        self.lpips_metric = self.lpips_metric.to(self.device)
         
         batch_size = restored.shape[0]
         rewards = torch.zeros(batch_size, 1, device=self.device)
@@ -206,28 +237,50 @@ class AdaIRPolicyNetwork(nn.Module):
             nn.ReLU(),
         )
         
-        # 输出3个FreModule × 8个参数的Beta分布参数
-        self.policy_head = nn.Sequential(
+        # 输出Beta分布参数: 12对(alpha, beta) = 24个参数
+        # 每个FreModule需要4个动作值（rate_h, rate_w, fuse_1, fuse_2）
+        # 3个FreModule × 4个动作 = 12个动作值
+        # 每个动作值需要(alpha, beta)参数 = 12 × 2 = 24个输出
+        self.alpha_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 3 * 8),  # 24个参数
+            nn.Linear(hidden_dim // 2, 12),  # 输出12个alpha参数
         )
         
-        # 初始化：输出接近1.0，对应Beta(1,1)均匀分布
-        self.policy_head[-1].bias.data.fill_(1.0)  # 初始化为1.0
-        self.policy_head[-1].weight.data.normal_(0, 0.01)
+        self.beta_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 12),  # 输出12个beta参数
+        )
+        
+        # 更保守的初始化：使用更稳定的Beta分布参数
+        # 目标：Beta(5, 5) 更集中在0.5附近，方差更小
+        self.alpha_head[-1].bias.data.fill_(1.6)  # log(5) ≈ 1.6，经过softplus后约为5
+        self.alpha_head[-1].weight.data.normal_(0, 0.001)  # 减小权重方差，更保守
+        
+        self.beta_head[-1].bias.data.fill_(1.6)  # 同样初始化为约5
+        self.beta_head[-1].weight.data.normal_(0, 0.001)  # 减小权重方差
         
     def forward(self, observation: TensorDict) -> TensorDict:
-        """策略网络前向传播"""
+        """策略网络前向传播 - 输出明确的Beta分布参数"""
         
         degraded_image = observation["degraded_image"]  # [B, 3, 128, 128]
         
         # 提取特征
         features = self.feature_extractor(degraded_image)
         
-        # 输出策略参数
-        policy_params = self.policy_head(features)  # [B, 24]
-        policy_params = torch.exp(policy_params) + 0.1  # 确保为正，使用exp而不是softplus
+        # 分别计算alpha和beta参数
+        alpha_raw = self.alpha_head(features)  # [B, 12]
+        beta_raw = self.beta_head(features)    # [B, 12]
+        
+        # 确保参数为正并且有合理的范围
+        alphas = F.softplus(alpha_raw) + 1.0  # 范围[1, inf)，避免退化分布
+        betas = F.softplus(beta_raw) + 1.0    # 范围[1, inf)
+        
+        # 组合成策略网络期望的格式 [B, 3, 8]
+        # 将12对(alpha,beta)重新排列为24个参数，然后reshape为[B, 3, 8]
+        alpha_beta_combined = torch.stack([alphas, betas], dim=-1)  # [B, 12, 2]
+        policy_params = alpha_beta_combined.view(degraded_image.shape[0], -1)  # [B, 24]
         policy_params = policy_params.view(-1, 3, 8)  # [B, 3, 8]
         
         return TensorDict({

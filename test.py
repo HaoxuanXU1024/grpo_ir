@@ -279,8 +279,8 @@ if __name__ == '__main__':
     parser.add_argument('--derain_path', type=str, default="data/test/derain/", help='save path of test raining images')
     parser.add_argument('--dehaze_path', type=str, default="data/test/dehaze/", help='save path of test hazy images')
 
-    parser.add_argument('--output_path', type=str, default="AdaIR_results/", help='output save path')
-    parser.add_argument('--ckpt_name', type=str, default="epoch=49-step=47350.ckpt", help='checkpoint save path')
+    parser.add_argument('--output_path', type=str, default="AdaIR_results1/", help='output save path')
+    parser.add_argument('--ckpt_name', type=str, default="epoch=49-step=94700.ckpt", help='checkpoint save path')
     # 训练集评测与导出 CSV
     parser.add_argument('--eval_train', action='store_true', help='Evaluate training data and export CSV metrics')
     parser.add_argument('--train_task', type=str, default='all', choices=['all','derain','dehaze','deblur','enhance','denoise'], help='Which train subset to evaluate')

@@ -6,7 +6,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--cuda', type=int, default=0)
 
 parser.add_argument('--epochs', type=int, default=150, help='maximum number of epochs to train the total model.')
-parser.add_argument('--batch_size', type=int,default=1,help="Batch size to use per GPU")
+parser.add_argument('--batch_size', type=int,default=2,help="Batch size to use per GPU")
 parser.add_argument('--lr', type=float, default=2e-4, help='learning rate of encoder.')
 
 parser.add_argument('--de_type', nargs='+', default=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'],
@@ -35,6 +35,7 @@ parser.add_argument("--num_gpus",type=int,default= 4, help = "Number of GPUs to 
 
 # GRPO fine-tuning options
 parser.add_argument('--grpo', action='store_true', help='Enable GRPO fine-tuning with stochastic low-dim actions')
+parser.add_argument('--grpo_torchrl', action='store_true', help='Use TorchRL framework for GRPO (more stable PPO implementation)')
 parser.add_argument('--grpo_group', type=int, default=4, help='Group size (number of stochastic samples per input)')
 parser.add_argument('--grpo_lambda_sup', type=float, default=0.1, help='Weight for supervised L1 stabilization')
 parser.add_argument('--grpo_lambda_consistency', type=float, default=0.05, help='Weight for consistency to deterministic output')
@@ -45,7 +46,7 @@ parser.add_argument('--grpo_w_lpips', type=float, default=0.3, help='Weight for 
 parser.add_argument('--grpo_w_niqe', type=float, default=0.0, help='Weight for NIQE component in reward (uses 1/(1+niqe))')
 
 # 新增的GRPO稳定性参数
-parser.add_argument('--grpo_max_grad_norm', type=float, default=1.0, help='Max gradient norm for clipping in GRPO')
+parser.add_argument('--grpo_max_grad_norm', type=float, default=0.5, help='Max gradient norm for clipping in GRPO (reduced for stability)')
 parser.add_argument('--grpo_beta_kl', type=float, default=0.01, help='KL regularization weight for GRPO')
 parser.add_argument('--grpo_clip_range', type=float, default=0.2, help='PPO clip range for policy loss')
 parser.add_argument('--grpo_adv_clip_max', type=float, default=5.0, help='Maximum value for advantage clipping')
