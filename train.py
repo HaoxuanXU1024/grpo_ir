@@ -20,6 +20,7 @@ import lightning.pytorch as pl
 from lightning.pytorch.loggers import WandbLogger,TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 import torch.nn.functional as F
+from typing import Tuple
 
 # TorchRL imports (only when needed)
 if opt.grpo_torchrl:
@@ -27,6 +28,7 @@ if opt.grpo_torchrl:
         from tensordict import TensorDict
         from torch.distributions import Beta
         from grpo_torchrl_env import AdaIRGRPOEnv, AdaIRPolicyNetwork
+        from net.model_torchrl import AdaIRTorchRL # 导入AdaIRTorchRL
     except ImportError as e:
         print(f"TorchRL imports failed: {e}")
         print("Please install TorchRL: bash install_torchrl.sh")
@@ -36,7 +38,11 @@ if opt.grpo_torchrl:
 class AdaIRModel(pl.LightningModule):
     def __init__(self):
         super().__init__()
-        self.net = AdaIR(decoder=True)
+        # 切换到 AdaIRTorchRL 模型以支持更清晰的动作注入
+        if opt.grpo_torchrl:
+            self.net = AdaIRTorchRL(decoder=True)
+        else:
+            self.net = AdaIR(decoder=True)
         self.loss_fn  = nn.L1Loss()
         # Cache baseline output for consistency (computed on-the-fly per batch)
         self.save_hyperparameters(ignore=['net'])
@@ -54,6 +60,20 @@ class AdaIRModel(pl.LightningModule):
         if opt.grpo_torchrl:
             self.setup_torchrl_grpo()
     
+    def _compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor, gamma: float = 0.99, gae_lambda: float = 0.95) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute Generalized Advantage Estimation (GAE)"""
+        advantages = torch.zeros_like(rewards)
+        last_gae_lam = 0
+        
+        # Since we have single-step episodes, this simplifies greatly.
+        # The 'next_value' is 0 because the episode is 'done'.
+        next_value = 0 
+        delta = rewards + gamma * next_value * (1.0 - dones) - values
+        advantages = delta + gamma * gae_lambda * last_gae_lam * (1.0 - dones) # last_gae_lam is 0
+        
+        returns = advantages + values
+        return advantages, returns
+
     def compute_policy_loss_ppo(self, log_probs, old_log_probs, advantages, clip_range=None):
         """Compute PPO-style clipped policy loss for more stable training"""
         if clip_range is None:
@@ -97,8 +117,82 @@ class AdaIRModel(pl.LightningModule):
         elif opt.grpo_torchrl:
             # TorchRL GRPO: Use more stable PPO implementation
             return self.torchrl_grpo_step(degrad_patch, clean_patch)
+        elif opt.grpo and opt.grpo_flow_style:
+            # GRPO with flow-style per-image advantage normalization
+            G = opt.grpo_group
+            batch_size = degrad_patch.size(0)
+
+            # 1. Repeat data for group sampling
+            repeated_degrad = degrad_patch.repeat_interleave(G, dim=0)
+            repeated_clean = clean_patch.repeat_interleave(G, dim=0)
+
+            # 2. Forward pass with stochastic policy
+            # out: [B*G, C, H, W], lp: [B*G]
+            out, lp = self.net(repeated_degrad, stochastic=True)
+
+            # 3. Compute rewards for each sample
+            with torch.no_grad():
+                w_psnr = opt.grpo_w_psnr
+                w_ssim = opt.grpo_w_ssim
+                w_lpips = opt.grpo_w_lpips
+                eps = 1e-6
+                
+                # PSNR (approx, per-image)
+                mse = torch.mean((out - repeated_clean) ** 2, dim=(1,2,3)) + eps
+                psnr = 10.0 * torch.log10(1.0 / mse)
+                psnr_norm = torch.clamp(psnr / 40.0, 0.0, 1.0)
+
+                # SSIM (per-image)
+                ssim_vals = []
+                for i in range(out.size(0)):
+                    ssim_vals.append(self.ssim_metric(out[i:i+1], repeated_clean[i:i+1]))
+                ssim_vals = torch.stack(ssim_vals).squeeze()
+                ssim_norm = torch.clamp(ssim_vals, 0.0, 1.0)
+                
+                # LPIPS (per-image)
+                out_p = out * 2 - 1
+                gt_p = repeated_clean * 2 - 1
+                lpips_vals = self.lpips_metric(out_p, gt_p).squeeze()
+                lp_norm = torch.clamp(lpips_vals, 0.0, 1.0)
+                one_minus_lp = 1.0 - lp_norm
+                
+                # Total reward
+                rewards_flat = w_psnr * psnr_norm + w_ssim * ssim_norm + w_lpips * one_minus_lp
+            
+            # 4. Per-image (group-wise) advantage normalization - THE CORE OF FLOW-GRPO
+            rewards = rewards_flat.view(batch_size, G) # [B, G]
+            mean_rewards = rewards.mean(dim=1, keepdim=True)
+            std_rewards = rewards.std(dim=1, keepdim=True) + 1e-8
+            advantages = (rewards - mean_rewards) / std_rewards
+            advantages_flat = advantages.view(-1) # [B*G]
+
+            # 5. Policy gradient loss with PPO-style clipping
+            old_lp = lp.detach()
+            pg_loss = self.compute_policy_loss_ppo(lp, old_lp, advantages_flat.detach())
+
+            # 6. Stabilization losses (optional but recommended)
+            sup_loss = self.loss_fn(out, repeated_clean) # Supervised loss on all samples
+            
+            with torch.no_grad():
+                det_out = self.net(repeated_degrad)
+            cons_loss = self.loss_fn(out, det_out) # Consistency loss on all samples
+
+            # 7. Total Loss
+            loss = pg_loss + opt.grpo_lambda_sup * sup_loss + opt.grpo_lambda_consistency * cons_loss
+
+            self.log_dict({
+                "flow_grpo_pg_loss": pg_loss,
+                "flow_grpo_sup_loss": sup_loss,
+                "flow_grpo_cons_loss": cons_loss,
+                "flow_grpo_train_loss": loss,
+                "flow_grpo_advantages_mean": advantages.mean(),
+                "flow_grpo_advantages_std": advantages.std(),
+                "flow_grpo_rewards_mean": rewards.mean(),
+                "flow_grpo_rewards_std": rewards.std(),
+            })
+            return loss
         else:
-            # GRPO: group sampling
+            # GRPO: group sampling (original implementation)
             with torch.no_grad():
                 det_out = self.net(degrad_patch)  # baseline deterministic output
             G = opt.grpo_group
@@ -245,17 +339,30 @@ class AdaIRModel(pl.LightningModule):
                         if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
                             params.extend(list(m.down.parameters()))
                             params.extend(list(m.up.parameters()))
+                
+                # Cautiously add more parameters for better fine-tuning
+                # 1. Add LayerNorm parameters from decoder and refinement layers
+                for name, module in self.net.named_modules():
+                    if any(decoder_name in name for decoder_name in ['decoder_level1', 'refinement']):
+                        if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
+                            params.extend(list(module.parameters()))
+                
+                # 2. Add the final output layer parameters
+                params.extend(list(self.net.output.parameters()))
+                
+                # 3. Add refinement layer parameters (safe to fine-tune)
+                params.extend(list(self.net.refinement.parameters()))
             else:
                 params = list(self.parameters())
             
-            # 修复学习率：使用极保守的学习率设置以确保稳定性
+            # 修复学习率：使用更合理的学习率设置以允许有效更新
             if opt.lr > 0:
-                lr = opt.lr * 0.01  # 极大幅降低，如2e-4 * 0.01 = 2e-6
+                lr = opt.lr * 0.1  # 适度降低，如2e-4 * 0.1 = 2e-5，保持有效更新
             else:
-                lr = 2e-6  # 使用极保守的默认学习率
+                lr = 2e-5  # 使用更合理的默认学习率
             
             optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
-            print(f"[INFO] TorchRL GRPO optimizer: lr={lr} (极保守设置), params={len(params)}")
+            print(f"[INFO] TorchRL GRPO optimizer: lr={lr} (更合理设置), params={len(params)}")
         
         # Original GRPO or standard training
         elif opt.train_policy_only:
@@ -272,6 +379,19 @@ class AdaIRModel(pl.LightningModule):
                         policy_params.append(p)
                     for p in m.up.parameters():
                         policy_params.append(p)
+            
+            # Cautiously add more parameters for better fine-tuning
+            # 1. Add LayerNorm parameters from decoder and refinement layers
+            for name, module in self.net.named_modules():
+                if any(decoder_name in name for decoder_name in ['decoder_level1', 'refinement']):
+                    if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
+                        policy_params.extend(list(module.parameters()))
+            
+            # 2. Add the final output layer parameters
+            policy_params.extend(list(self.net.output.parameters()))
+            
+            # 3. Add refinement layer parameters (safe to fine-tune)
+            policy_params.extend(list(self.net.refinement.parameters()))
             
             # Use lower learning rate for GRPO training
             lr = opt.lr if not opt.grpo else opt.lr * 0.1
@@ -326,6 +446,19 @@ class AdaIRModel(pl.LightningModule):
                             params.append(p)
                         for p in m.up.parameters():
                             params.append(p)
+                
+                # Add the same additional parameters as in configure_optimizers
+                # 1. Add LayerNorm parameters from decoder and refinement layers
+                for name, module in self.net.named_modules():
+                    if any(decoder_name in name for decoder_name in ['decoder_level1', 'refinement']):
+                        if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
+                            params.extend(list(module.parameters()))
+                
+                # 2. Add the final output layer parameters
+                params.extend(list(self.net.output.parameters()))
+                
+                # 3. Add refinement layer parameters (safe to fine-tune)
+                params.extend(list(self.net.refinement.parameters()))
             else:
                 params = self.parameters()
             
@@ -384,6 +517,8 @@ class AdaIRModel(pl.LightningModule):
             self.net = self.net.to(current_device)
             self.policy_network = self.policy_network.to(current_device) 
             self.value_network = self.value_network.to(current_device)
+            if hasattr(self, '_target_policy_network'):
+                self._target_policy_network = self._target_policy_network.to(current_device)
             self._device_synced = current_device
             print(f"[INFO] Synced TorchRL components to device: {current_device}")
         
@@ -405,15 +540,8 @@ class AdaIRModel(pl.LightningModule):
         raw_params = action_td["action"]["freq_params"]  # [B, 3, 8]
         
         # 修复维度处理：将24个参数转换为正确的Beta分布参数
-        # 每个FreModule有8个参数：4个rate参数 + 4个fuse参数
-        # 每4个参数对应2对(alpha,beta)：rate(alpha,beta) + rate(alpha,beta), fuse(alpha,beta) + fuse(alpha,beta)
-        # 总共：3个FreModule × 4对(alpha,beta) = 12对(alpha,beta) = 24个参数 ✓
+        # 每个FreModule有4对(alpha,beta)，共12对
         batch_size = raw_params.shape[0]
-        
-        # 但实际上，根据FreModule的定义：
-        # policy_rate输出4个：[alpha_h, beta_h, alpha_w, beta_w] - 2对(alpha,beta)
-        # policy_fuse输出4个：[alpha_1, beta_1, alpha_2, beta_2] - 2对(alpha,beta)  
-        # 每个FreModule共4对(alpha,beta)，3个FreModule共12对(alpha,beta)
         
         # 重新整形：[B, 3, 8] -> [B, 24] -> [B, 12, 2]
         reshaped_params = raw_params.view(batch_size, -1)  # [B, 24]
@@ -427,7 +555,7 @@ class AdaIRModel(pl.LightningModule):
         policy_dist = Beta(alphas, betas)
         
         # 从分布中采样动作
-        sampled_actions = policy_dist.sample()  # [B, 12]
+        sampled_actions = policy_dist.rsample()  # [B, 12], use rsample for reparameterization trick
         
         # 计算当前策略的log概率
         current_log_probs = policy_dist.log_prob(sampled_actions).sum(dim=-1)  # [B]
@@ -438,16 +566,14 @@ class AdaIRModel(pl.LightningModule):
         if not hasattr(self, '_target_policy_network'):
             # 创建目标策略网络（旧策略的拷贝）
             import copy
-            self._target_policy_network = copy.deepcopy(self.policy_network)
-            self._target_update_count = 0
+            self._target_policy_network = copy.deepcopy(self.policy_network).to(current_device)
+            self._target_policy_network.eval()
         
-        # 每N步更新一次目标网络
-        self._target_update_count += 1
-        if self._target_update_count % 10 == 0:  # 每10步更新一次
-            # 软更新：target = 0.9 * target + 0.1 * current
-            for target_param, current_param in zip(self._target_policy_network.parameters(), 
-                                                   self.policy_network.parameters()):
-                target_param.data = 0.9 * target_param.data + 0.1 * current_param.data
+        # 软更新目标网络 (每个step都更新)
+        tau = 0.005 # Common soft update factor
+        for target_param, current_param in zip(self._target_policy_network.parameters(), 
+                                               self.policy_network.parameters()):
+            target_param.data.copy_(tau * current_param.data + (1.0 - tau) * target_param.data)
         
         # 使用目标网络计算old_log_probs
         with torch.no_grad():
@@ -465,28 +591,15 @@ class AdaIRModel(pl.LightningModule):
             old_log_probs = old_policy_dist.log_prob(sampled_actions).sum(dim=-1)
         
         # 将采样的动作重新整形为FreModule期望的格式
-        # sampled_actions: [B, 12] - 12个Beta分布采样值
-        # 需要重新整形为：[B, 3, 8] - 3个FreModule，每个8个参数
-        
-        # 每个FreModule需要8个参数：
-        # - policy_rate: 4个参数 [alpha_h, beta_h, alpha_w, beta_w] -> 采样2个值 [r_h, r_w] 
-        # - policy_fuse: 4个参数 [alpha_1, beta_1, alpha_2, beta_2] -> 采样2个值 [g_1, g_2]
-        # 所以每个FreModule从4对(alpha,beta)采样得到4个值
-        
-        # 重新整形：[B, 12] -> [B, 3, 4] -> [B, 3, 8] (重复以匹配原始格式)
-        freq_params_sampled = sampled_actions.view(batch_size, 3, 4)  # [B, 3, 4]
-        
-        # 扩展为[B, 3, 8]格式以兼容环境接口
-        # 前4个是rate相关，后4个是fuse相关
-        freq_params_expanded = torch.zeros(batch_size, 3, 8, device=current_device)
-        freq_params_expanded[:, :, :4] = freq_params_sampled  # rate相关的4个采样值
-        freq_params_expanded[:, :, 4:8] = freq_params_sampled  # fuse相关的4个采样值 (复用)
+        # sampled_actions: [B, 12] -> [B, 3, 4]
+        # 每个FreModule得到4个动作值 (r_h, r_w, g1, g2)
+        actions_reshaped = sampled_actions.view(batch_size, 3, 4)
         
         # === 环境步进 ===
         env_input = TensorDict({
             **obs, 
             "action": TensorDict({
-                "freq_params": freq_params_expanded
+                "actions": actions_reshaped # 使用新的key和正确的shape
             }, batch_size=degrad_patch.shape[:1])
         }, batch_size=degrad_patch.shape[:1], device=current_device)
         
@@ -495,64 +608,33 @@ class AdaIRModel(pl.LightningModule):
         # === 价值估计 ===
         values = self.value_network(degrad_patch).squeeze(-1)
         
-        # === 奖励与优势计算 ===
-        rewards = next_obs_td["reward"].squeeze(-1).to(current_device)
-        values = values.to(current_device)
+        # === 奖励与优势计算 (GAE) ===
+        rewards = next_obs_td["reward"].squeeze(-1)
+        dones = next_obs_td["done"].squeeze(-1).float()
         
-        # 优势计算（简化版GAE）
-        advantages = rewards - values.detach()
+        # 使用GAE计算优势和回报
+        advantages, returns = self._compute_gae(rewards, values.detach(), dones)
+        
+        # 归一化优势
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
-        # === 正确的PPO损失计算 ===
+        # === PPO损失计算 ===
         # 计算重要性采样比率
         ratio = torch.exp(current_log_probs - old_log_probs.detach())
         
-        # 紧急安全检查：如果ratio过于极端，直接停止策略更新
-        if torch.any(ratio > 100) or torch.any(ratio < 0.01):
-            print(f"[EMERGENCY] 检测到极端ratio值: max={ratio.max():.1f}, min={ratio.min():.3f}")
-            print("[EMERGENCY] 跳过此次策略更新，仅使用监督损失")
-            # 返回纯监督损失，跳过策略更新
-            with torch.no_grad():
-                det_output = self.net(degrad_patch)
-            restored_image = next_obs_td["restored_image"]
-            emergency_loss = self.loss_fn(restored_image, clean_patch)
-            return emergency_loss
-        
-        # 强制限制ratio到安全范围
-        ratio = torch.clamp(ratio, 0.1, 10.0)  # 更严格的硬性限制
-        
-        # 添加更强的约束：如果ratio过大，进行额外的KL惩罚
-        kl_divergence = current_log_probs - old_log_probs.detach()
-        mean_kl = kl_divergence.mean()
-        
-        # PPO clipped objective with enhanced constraints
+        # PPO clipped objective
         clip_range = opt.grpo_clip_range
-        
-        # 根据KL散度动态调整clip_range
-        if mean_kl.abs() > 1.0:  # 极大的KL散度
-            clip_range = clip_range * 0.1  # 严重收紧
-            print(f"[WARNING] KL散度极大({mean_kl:.3f})，严重收紧clip_range至{clip_range:.3f}")
-        elif mean_kl.abs() > 0.5:
-            clip_range = clip_range * 0.5
-            print(f"[INFO] KL散度过大({mean_kl:.3f})，收紧clip_range至{clip_range:.3f}")
-        
-        # 更保守的ratio clipping
-        ratio_clipped = torch.clamp(ratio, 0.5, 2.0)  # 硬性限制ratio范围
-        
-        surr1 = ratio_clipped * advantages
-        surr2 = torch.clamp(ratio_clipped, 1.0 - clip_range, 1.0 + clip_range) * advantages
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
         
-        # 添加更强的KL惩罚项
-        kl_penalty = 0.1 * mean_kl.abs()  # 增加KL惩罚系数
-        policy_loss = policy_loss + kl_penalty
-        
         # === 价值损失 ===
-        value_loss = nn.MSELoss()(values, rewards)
+        # 使用GAE计算的returns作为目标
+        value_loss = F.mse_loss(values, returns)
         
         # === 熵正则化（鼓励探索）===
         entropy = policy_dist.entropy().mean()
-        entropy_loss = -0.05 * entropy  # 增加熵系数，鼓励更多探索
+        entropy_loss = -0.01 * entropy # 使用较小的熵系数
         
         # === 监督损失（稳定项）===
         with torch.no_grad():
@@ -570,46 +652,24 @@ class AdaIRModel(pl.LightningModule):
         
         # PPO训练不需要手动更新old_log_probs，它们在每个batch开始时自动重置
         
-        # === 验证检查 ===
-        # 检查关键值是否在合理范围内
-        if torch.isnan(total_loss) or torch.isinf(total_loss):
-            print(f"[WARNING] Invalid total_loss detected: {total_loss}")
-        
-        if ratio.mean() > 2.0 or ratio.mean() < 0.5:
-            print(f"[WARNING] PPO ratio异常: mean={ratio.mean():.3f}, std={ratio.std():.3f}")
-        
-        if rewards.mean() < 0 or rewards.mean() > 1:
-            print(f"[WARNING] 奖励范围异常: mean={rewards.mean():.3f}, std={rewards.std():.3f}")
-        
-        # 检查梯度是否正常
-        total_grad_norm = 0.0
-        for p in self.policy_network.parameters():
-            if p.grad is not None:
-                total_grad_norm += p.grad.data.norm(2) ** 2
-        total_grad_norm = total_grad_norm ** 0.5
-        if total_grad_norm > 10.0:
-            print(f"[WARNING] 策略网络梯度过大: {total_grad_norm:.3f}")
-        
         # === 详细日志记录 ===
-        self.log("torchrl_policy_loss", policy_loss)
-        self.log("torchrl_kl_penalty", kl_penalty)
-        self.log("torchrl_kl_divergence", mean_kl.abs())
-        self.log("torchrl_value_loss", value_loss)
-        self.log("torchrl_entropy_loss", entropy_loss)
-        self.log("torchrl_entropy", entropy)
-        self.log("torchrl_sup_loss", sup_loss)
-        self.log("torchrl_cons_loss", cons_loss)
-        self.log("torchrl_total_loss", total_loss)
-        self.log("torchrl_reward_mean", rewards.mean())
-        self.log("torchrl_advantages_mean", advantages.mean())
-        self.log("torchrl_advantages_std", advantages.std())
-        self.log("torchrl_ratio_mean", ratio.mean())
-        self.log("torchrl_ratio_std", ratio.std())
-        self.log("torchrl_ratio_clipped_mean", ratio_clipped.mean())
-        self.log("torchrl_current_log_probs_mean", current_log_probs.mean())
-        self.log("torchrl_old_log_probs_mean", old_log_probs.mean())
-        self.log("torchrl_alpha_mean", alphas.mean())
-        self.log("torchrl_beta_mean", betas.mean())
+        self.log_dict({
+            "torchrl_policy_loss": policy_loss,
+            "torchrl_value_loss": value_loss,
+            "torchrl_entropy_loss": entropy_loss,
+            "torchrl_entropy": entropy,
+            "torchrl_sup_loss": sup_loss,
+            "torchrl_cons_loss": cons_loss,
+            "torchrl_total_loss": total_loss,
+            "torchrl_reward_mean": rewards.mean(),
+            "torchrl_advantages_mean": advantages.mean(),
+            "torchrl_returns_mean": returns.mean(),
+            "torchrl_ratio_mean": ratio.mean(),
+            "torchrl_current_log_probs_mean": current_log_probs.mean(),
+            "torchrl_old_log_probs_mean": old_log_probs.mean(),
+            "torchrl_alpha_mean": alphas.mean(),
+            "torchrl_beta_mean": betas.mean(),
+        })
         
         return total_loss
 
@@ -625,14 +685,16 @@ def main():
     # Optional: restrict training to worst-case lists for GRPO finetuning
     trainset = AdaIRTrainDataset(opt)
     if opt.finetune_worst:
-        # Override sample_ids to only include worst lists
+        # Use worst_dir to construct file paths automatically
+        worst_dir = opt.worst_dir
         worst_paths = {
-            'derain': opt.worst_derain,
-            'dehaze': opt.worst_dehaze,
-            'deblur': opt.worst_deblur,
-            'enhance': opt.worst_enhance,
-            'denoise': opt.worst_denoise,
+            'derain': os.path.join(worst_dir, 'train_derain_worst.txt'),
+            'dehaze': os.path.join(worst_dir, 'train_dehaze_worst.txt'),
+            'deblur': os.path.join(worst_dir, 'train_deblur_worst.txt'),
+            'enhance': os.path.join(worst_dir, 'train_enhance_worst.txt'),
+            'denoise': os.path.join(worst_dir, 'train_denoise_worst_merged.txt'),
         }
+        
         filtered = []
         # Build maps from known training directories
         derain_root = opt.derain_dir if hasattr(opt, 'derain_dir') else 'data/Train/Derain/'
@@ -644,47 +706,51 @@ def main():
         # Helper to safely read list
         def read_list(path):
             if not os.path.exists(path):
+                print(f"[WARN] Worst list file not found: {path}")
                 return []
-            return [ln.strip() for ln in open(path) if ln.strip()]
+            with open(path, 'r') as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            print(f"[INFO] Loaded {len(lines)} samples from {path}")
+            return lines
 
-        # Derain: entries like 'rainy/rain-xxx.png'
+        # Derain: entries like 'rainy/rain-xxx.png' - store full path
         for rel in read_list(worst_paths['derain']):
-            rainy_path = os.path.join(derain_root, rel)
-            if os.path.exists(rainy_path):
-                filtered.append({'clean_id': rainy_path, 'de_type': 3})
+            full_path = os.path.join(derain_root, rel)
+            if os.path.exists(full_path):
+                filtered.append({'clean_id': full_path, 'de_type': 3})
 
-        # Dehaze: entries are relative under dehaze_dir (synthetic/...)
+        # Dehaze: entries like 'synthetic/partX/xxx.jpg' - store full path
         for rel in read_list(worst_paths['dehaze']):
-            syn_path = os.path.join(dehaze_root, rel)
-            if os.path.exists(syn_path):
-                filtered.append({'clean_id': syn_path, 'de_type': 4})
+            full_path = os.path.join(dehaze_root, rel)
+            if os.path.exists(full_path):
+                filtered.append({'clean_id': full_path, 'de_type': 4})
 
-        # Deblur: entries like 'blur/xxx.png'
+        # Deblur: entries like 'blur/xxx.png' - extract filename only
         for rel in read_list(worst_paths['deblur']):
             if rel.startswith('blur/'):
-                name = rel.split('blur/')[-1]
+                filename = rel.split('blur/')[-1]
             else:
-                name = rel
-            blur_path = os.path.join(gopro_root, 'blur', name)
+                filename = rel
+            blur_path = os.path.join(gopro_root, 'blur', filename)
             if os.path.exists(blur_path):
-                filtered.append({'clean_id': name, 'de_type': 5})
+                filtered.append({'clean_id': filename, 'de_type': 5})
 
-        # Enhance: entries like 'low/xxx.png'
+        # Enhance: entries like 'low/xxx.png' - extract filename only  
         for rel in read_list(worst_paths['enhance']):
             if rel.startswith('low/'):
-                name = rel.split('low/')[-1]
+                filename = rel.split('low/')[-1]
             else:
-                name = rel
-            low_path = os.path.join(enhance_root, 'low', name)
+                filename = rel
+            low_path = os.path.join(enhance_root, 'low', filename)
             if os.path.exists(low_path):
-                filtered.append({'clean_id': name, 'de_type': 6})
+                filtered.append({'clean_id': filename, 'de_type': 6})
 
-        # Denoise: list contains filenames in denoise_dir
-        for name in read_list(worst_paths['denoise']):
-            cpath = os.path.join(denoise_root, name)
-            if os.path.exists(cpath):
-                # Use sigma 25 as middle difficulty by default; GRPO 训练中会随机 group 采样
-                filtered.append({'clean_id': cpath, 'de_type': 1})
+        # Denoise: entries are bare filenames - store full path
+        for filename in read_list(worst_paths['denoise']):
+            full_path = os.path.join(denoise_root, filename)
+            if os.path.exists(full_path):
+                # Use sigma 25 as middle difficulty by default
+                filtered.append({'clean_id': full_path, 'de_type': 1})
 
         if len(filtered) == 0:
             print('[WARN] No worst samples found; falling back to full train set')

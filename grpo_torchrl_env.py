@@ -32,7 +32,9 @@ class AdaIRGRPOEnv:
         self.device = device
         
         # 初始化AdaIR模型
-        self.adair_model = AdaIR(decoder=True).to(device)
+        # 注意: 这里创建的模型实例主要用于获取结构信息，实际训练中会被外部传入的模型替代
+        from net.model_torchrl import AdaIRTorchRL
+        self.adair_model = AdaIRTorchRL(decoder=True).to(device)
         self.adair_model.eval()
         
         # 奖励计算组件
@@ -53,12 +55,12 @@ class AdaIRGRPOEnv:
     def step(self, action_dict):
         """执行一步：使用策略动作运行AdaIR并计算奖励"""
         
-        # 提取动作参数
-        freq_params = action_dict["action"]["freq_params"]  # [B, 3, 8]
+        # 提取动作参数, 现在是采样好的动作值
+        actions = action_dict["action"]["actions"]  # [B, 3, 4]
         
         # 运行AdaIR模型with策略参数
         restored_image = self._run_adair_with_policy(
-            self.current_degraded, freq_params
+            self.current_degraded, actions
         )
         
         # 计算奖励
@@ -75,8 +77,8 @@ class AdaIRGRPOEnv:
             "restored_image": restored_image,  # 用于调试和可视化
         }, batch_size=self.current_degraded.shape[:1], device=self.device)
     
-    def _run_adair_with_policy(self, degraded: torch.Tensor, freq_params: torch.Tensor) -> torch.Tensor:
-        """使用策略参数运行AdaIR模型 - 真正的参数注入版本"""
+    def _run_adair_with_policy(self, degraded: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        """使用策略动作运行AdaIR模型 - 真正的动作注入版本"""
         
         # 确保输入在正确的设备上
         degraded = degraded.to(self.device)
@@ -90,85 +92,20 @@ class AdaIRGRPOEnv:
         # 确保模型在正确的设备上
         actual_model = actual_model.to(self.device)
         
-        # 注入策略参数到FreModule
-        self._inject_policy_to_fremodules(freq_params, actual_model)
+        # 使用 model_torchrl 中定义的标准方法注入动作
+        actual_model.inject_actions(actions)
         
-        with torch.no_grad():
-            # 使用stochastic=True模式，这样FreModule会使用我们注入的参数
-            result = actual_model(degraded, stochastic=True)
-            if isinstance(result, tuple):
-                restored = result[0]  # (output, log_prob)
-            else:
-                restored = result
+        # 使用stochastic=True模式，FreModule现在会使用我们注入的动作
+        # 模型现在只返回restored_image
+        result = actual_model(degraded, stochastic=True)
+
+        # 修正：处理模型在stochastic模式下返回元组的情况
+        if isinstance(result, tuple):
+            restored = result[0]
+        else:
+            restored = result
             
         return restored
-    
-    def _inject_policy_to_fremodules(self, freq_params: torch.Tensor, model):
-        """将策略参数注入到AdaIR的FreModule中"""
-        
-        # 获取3个FreModule
-        fre_modules = [model.fre1, model.fre2, model.fre3]
-        
-        for i, fre_module in enumerate(fre_modules):
-            params = freq_params[:, i, :]  # [B, 8]
-            
-            # 覆盖策略头的前向传播
-            # 这是一个hack，但对于RL训练是必要的
-            self._override_policy_head(fre_module, params)
-    
-    def _override_policy_head(self, fre_module, params):
-        """临时覆盖FreModule的策略头输出"""
-        
-        # 确保参数在正确的设备上（与FreModule相同的设备）
-        device = next(fre_module.parameters()).device
-        params = params.to(device)
-        
-        # 分离rate和fuse参数
-        rate_params = params[:, :4]   # [B, 4] - alpha_h, beta_h, alpha_w, beta_w  
-        fuse_params = params[:, 4:8]  # [B, 4] - alpha_1, beta_1, alpha_2, beta_2
-        
-        # 创建临时的forward函数来替换policy_rate的输出
-        def temp_rate_forward(x):
-            # x是pooled特征 [B, dim, 1, 1]
-            batch_size = x.size(0)
-            device = x.device  # 使用输入的设备
-            # 直接返回我们的策略参数，确保形状和设备正确
-            output = rate_params.to(device).view(batch_size, 4, 1, 1)
-            # 应用softplus确保参数为正
-            return F.softplus(output) + 1e-4
-        
-        def temp_fuse_forward(x):
-            # x是pooled特征 [B, dim, 1, 1] 
-            batch_size = x.size(0)
-            device = x.device  # 使用输入的设备
-            # 直接返回我们的融合参数，确保设备正确
-            output = fuse_params.to(device).view(batch_size, 4, 1, 1)
-            return F.softplus(output) + 1e-4
-        
-        # 临时替换forward方法
-        fre_module.policy_rate._temp_forward = fre_module.policy_rate.forward
-        fre_module.policy_rate.forward = temp_rate_forward
-        
-        fre_module.policy_fuse._temp_forward = fre_module.policy_fuse.forward  
-        fre_module.policy_fuse.forward = temp_fuse_forward
-    
-    def _restore_policy_heads(self):
-        """恢复原始的策略头"""
-        # 处理DDP包装的模型
-        actual_model = self.adair_model
-        if hasattr(self.adair_model, 'module'):
-            actual_model = self.adair_model.module
-            
-        fre_modules = [actual_model.fre1, actual_model.fre2, actual_model.fre3]
-        
-        for fre_module in fre_modules:
-            if hasattr(fre_module.policy_rate, '_temp_forward'):
-                fre_module.policy_rate.forward = fre_module.policy_rate._temp_forward
-                delattr(fre_module.policy_rate, '_temp_forward')
-                
-            if hasattr(fre_module.policy_fuse, '_temp_forward'):
-                fre_module.policy_fuse.forward = fre_module.policy_fuse._temp_forward
-                delattr(fre_module.policy_fuse, '_temp_forward')
     
     def _compute_reward(self, restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
         """计算多指标组合奖励"""
@@ -211,8 +148,8 @@ class AdaIRGRPOEnv:
                 
                 rewards[i, 0] = total_reward
         
-        # 恢复策略头
-        self._restore_policy_heads()
+        # 不再需要恢复策略头，因为我们没有修改它
+        # self._restore_policy_heads()
         
         return rewards
     

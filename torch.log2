@@ -1,0 +1,209 @@
+🚀 启动整合的TorchRL GRPO训练...
+时间: 2025年 08月 22日 星期五 21:08:48 CST
+工作目录: /data2/haoxuan/AdaIR
+Python路径: /data2/haoxuan/AdaIR:/opt/ros/noetic/lib/python3/dist-packages
+✅ 使用主训练脚本 train.py + TorchRL框架
+检测到 4 个GPU
+🚀 启动4卡分布式TorchRL GRPO训练...
+[2025-08-22 21:08:52,402] torch.distributed.run: [WARNING] 
+[2025-08-22 21:08:52,402] torch.distributed.run: [WARNING] *****************************************
+[2025-08-22 21:08:52,402] torch.distributed.run: [WARNING] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+[2025-08-22 21:08:52,402] torch.distributed.run: [WARNING] *****************************************
+Options
+Namespace(cuda=0, epochs=50, batch_size=6, lr=2e-05, de_type=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'], patch_size=128, num_workers=16, data_file_dir='data_dir/', denoise_dir='data/Train/Denoise/', gopro_dir='data/Train/Deblur/', enhance_dir='data/Train/Enhance/', derain_dir='data/Train/Derain/', dehaze_dir='data/Train/Dehaze/', output_path='output/', ckpt_path='ckpt/Denoise/', wblogger='AdaIR-TorchRL-GRPO-4GPU', ckpt_dir='torchrl_grpo_4gpu', num_gpus=4, grpo=True, grpo_torchrl=True, grpo_flow_style=False, grpo_group=2, grpo_lambda_sup=0.1, grpo_lambda_consistency=0.05, grpo_reward='l1', grpo_w_psnr=0.4, grpo_w_ssim=0.3, grpo_w_lpips=0.3, grpo_w_niqe=0.0, grpo_max_grad_norm=0.5, grpo_beta_kl=0.01, grpo_clip_range=0.4, grpo_adv_clip_max=5.0, grpo_global_norm=False, grpo_warmup_epochs=5, grpo_schedule_sup=False, resume_ckpt='/data2/haoxuan/AdaIR/ckpt/adair5d.ckpt', lora=True, lora_targets='attn,cross_attn', lora_r=16, lora_alpha=16.0, lora_dropout=0.0, train_policy_only=True, finetune_worst=False, worst_dir='AdaIR_results/train_eval/', worst_derain='AdaIR_results/train_eval/train_derain_worst.txt', worst_dehaze='AdaIR_results/train_eval/train_dehaze_worst.txt', worst_deblur='AdaIR_results/train_eval/train_deblur_worst.txt', worst_enhance='AdaIR_results/train_eval/train_enhance_worst.txt', worst_denoise='AdaIR_results/train_eval/train_denoise_worst_merged.txt')
+['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance']
+Total Denoise Ids : 4744
+Total Rainy Ids : 24000
+Total Hazy Ids : 72135
+Total Blur Ids : 10515
+Total enhance Ids : 9700
+159046
+Options
+Namespace(cuda=0, epochs=50, batch_size=6, lr=2e-05, de_type=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'], patch_size=128, num_workers=16, data_file_dir='data_dir/', denoise_dir='data/Train/Denoise/', gopro_dir='data/Train/Deblur/', enhance_dir='data/Train/Enhance/', derain_dir='data/Train/Derain/', dehaze_dir='data/Train/Dehaze/', output_path='output/', ckpt_path='ckpt/Denoise/', wblogger='AdaIR-TorchRL-GRPO-4GPU', ckpt_dir='torchrl_grpo_4gpu', num_gpus=4, grpo=True, grpo_torchrl=True, grpo_flow_style=False, grpo_group=2, grpo_lambda_sup=0.1, grpo_lambda_consistency=0.05, grpo_reward='l1', grpo_w_psnr=0.4, grpo_w_ssim=0.3, grpo_w_lpips=0.3, grpo_w_niqe=0.0, grpo_max_grad_norm=0.5, grpo_beta_kl=0.01, grpo_clip_range=0.4, grpo_adv_clip_max=5.0, grpo_global_norm=False, grpo_warmup_epochs=5, grpo_schedule_sup=False, resume_ckpt='/data2/haoxuan/AdaIR/ckpt/adair5d.ckpt', lora=True, lora_targets='attn,cross_attn', lora_r=16, lora_alpha=16.0, lora_dropout=0.0, train_policy_only=True, finetune_worst=False, worst_dir='AdaIR_results/train_eval/', worst_derain='AdaIR_results/train_eval/train_derain_worst.txt', worst_dehaze='AdaIR_results/train_eval/train_dehaze_worst.txt', worst_deblur='AdaIR_results/train_eval/train_deblur_worst.txt', worst_enhance='AdaIR_results/train_eval/train_enhance_worst.txt', worst_denoise='AdaIR_results/train_eval/train_denoise_worst_merged.txt')
+['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance']
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=AlexNet_Weights.IMAGENET1K_V1`. You can also use `weights=AlexNet_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+Options
+Namespace(cuda=0, epochs=50, batch_size=6, lr=2e-05, de_type=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'], patch_size=128, num_workers=16, data_file_dir='data_dir/', denoise_dir='data/Train/Denoise/', gopro_dir='data/Train/Deblur/', enhance_dir='data/Train/Enhance/', derain_dir='data/Train/Derain/', dehaze_dir='data/Train/Dehaze/', output_path='output/', ckpt_path='ckpt/Denoise/', wblogger='AdaIR-TorchRL-GRPO-4GPU', ckpt_dir='torchrl_grpo_4gpu', num_gpus=4, grpo=True, grpo_torchrl=True, grpo_flow_style=False, grpo_group=2, grpo_lambda_sup=0.1, grpo_lambda_consistency=0.05, grpo_reward='l1', grpo_w_psnr=0.4, grpo_w_ssim=0.3, grpo_w_lpips=0.3, grpo_w_niqe=0.0, grpo_max_grad_norm=0.5, grpo_beta_kl=0.01, grpo_clip_range=0.4, grpo_adv_clip_max=5.0, grpo_global_norm=False, grpo_warmup_epochs=5, grpo_schedule_sup=False, resume_ckpt='/data2/haoxuan/AdaIR/ckpt/adair5d.ckpt', lora=True, lora_targets='attn,cross_attn', lora_r=16, lora_alpha=16.0, lora_dropout=0.0, train_policy_only=True, finetune_worst=False, worst_dir='AdaIR_results/train_eval/', worst_derain='AdaIR_results/train_eval/train_derain_worst.txt', worst_dehaze='AdaIR_results/train_eval/train_dehaze_worst.txt', worst_deblur='AdaIR_results/train_eval/train_deblur_worst.txt', worst_enhance='AdaIR_results/train_eval/train_enhance_worst.txt', worst_denoise='AdaIR_results/train_eval/train_denoise_worst_merged.txt')
+Total Denoise Ids : 4744
+Total Rainy Ids : 24000
+Total Hazy Ids : 72135
+Total Blur Ids : 10515
+Total enhance Ids : 9700
+159046
+Options
+Namespace(cuda=0, epochs=50, batch_size=6, lr=2e-05, de_type=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'], patch_size=128, num_workers=16, data_file_dir='data_dir/', denoise_dir='data/Train/Denoise/', gopro_dir='data/Train/Deblur/', enhance_dir='data/Train/Enhance/', derain_dir='data/Train/Derain/', dehaze_dir='data/Train/Dehaze/', output_path='output/', ckpt_path='ckpt/Denoise/', wblogger='AdaIR-TorchRL-GRPO-4GPU', ckpt_dir='torchrl_grpo_4gpu', num_gpus=4, grpo=True, grpo_torchrl=True, grpo_flow_style=False, grpo_group=2, grpo_lambda_sup=0.1, grpo_lambda_consistency=0.05, grpo_reward='l1', grpo_w_psnr=0.4, grpo_w_ssim=0.3, grpo_w_lpips=0.3, grpo_w_niqe=0.0, grpo_max_grad_norm=0.5, grpo_beta_kl=0.01, grpo_clip_range=0.4, grpo_adv_clip_max=5.0, grpo_global_norm=False, grpo_warmup_epochs=5, grpo_schedule_sup=False, resume_ckpt='/data2/haoxuan/AdaIR/ckpt/adair5d.ckpt', lora=True, lora_targets='attn,cross_attn', lora_r=16, lora_alpha=16.0, lora_dropout=0.0, train_policy_only=True, finetune_worst=False, worst_dir='AdaIR_results/train_eval/', worst_derain='AdaIR_results/train_eval/train_derain_worst.txt', worst_dehaze='AdaIR_results/train_eval/train_dehaze_worst.txt', worst_deblur='AdaIR_results/train_eval/train_deblur_worst.txt', worst_enhance='AdaIR_results/train_eval/train_enhance_worst.txt', worst_denoise='AdaIR_results/train_eval/train_denoise_worst_merged.txt')
+['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance']
+Total Denoise Ids : 4744
+Total Rainy Ids : 24000
+Total Hazy Ids : 72135
+Total Blur Ids : 10515
+Total enhance Ids : 9700
+159046
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=AlexNet_Weights.IMAGENET1K_V1`. You can also use `weights=AlexNet_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=AlexNet_Weights.IMAGENET1K_V1`. You can also use `weights=AlexNet_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[INFO] Resuming weights from /data2/haoxuan/AdaIR/ckpt/adair5d.ckpt (strict=False)
+wandb: Currently logged in as: 704850562 (704850562-hkust). Use `wandb login --relogin` to force relogin
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[INFO] Resuming weights from /data2/haoxuan/AdaIR/ckpt/adair5d.ckpt (strict=False)
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[INFO] Resuming weights from /data2/haoxuan/AdaIR/ckpt/adair5d.ckpt (strict=False)
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+wandb: - Waiting for wandb.init()...Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+wandb: \ Waiting for wandb.init()...Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[LoRA] Total applied to 0 layers
+[INFO] Applied LoRA to 0 layers (targets=attn,cross_attn, r=16, alpha=16.0)
+Initializing distributed: GLOBAL_RANK: 1, MEMBER: 2/4
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[LoRA] Total applied to 0 layers
+[INFO] Applied LoRA to 0 layers (targets=attn,cross_attn, r=16, alpha=16.0)
+Initializing distributed: GLOBAL_RANK: 2, MEMBER: 3/4
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[LoRA] Total applied to 0 layers
+[INFO] Applied LoRA to 0 layers (targets=attn,cross_attn, r=16, alpha=16.0)
+Initializing distributed: GLOBAL_RANK: 3, MEMBER: 4/4
+wandb: wandb version 0.21.1 is available!  To upgrade, please run:
+wandb:  $ pip install wandb --upgrade
+wandb: Tracking run with wandb version 0.13.9
+wandb: Run data is saved locally in ./wandb/run-20250822_210857-wqczp9vk
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run AdaIR-Train
+wandb: ⭐️ View project at https://wandb.ai/704850562-hkust/AdaIR-TorchRL-GRPO-4GPU
+wandb: 🚀 View run at https://wandb.ai/704850562-hkust/AdaIR-TorchRL-GRPO-4GPU/runs/wqczp9vk
+['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance']
+Total Denoise Ids : 4744
+Total Rainy Ids : 24000
+Total Hazy Ids : 72135
+Total Blur Ids : 10515
+Total enhance Ids : 9700
+159046
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=AlexNet_Weights.IMAGENET1K_V1`. You can also use `weights=AlexNet_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+[INFO] Resuming weights from /data2/haoxuan/AdaIR/ckpt/adair5d.ckpt (strict=False)
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lpips/weights/v0.1/alex.pth
+[INFO] TorchRL GRPO components initialized
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lightning/pytorch/core/saving.py:153: UserWarning: Found keys that are in the model state dict but not in the checkpoint: ['running_reward_mean', 'running_reward_var', 'reward_count', 'net.fre1.policy_rate.0.weight', 'net.fre1.policy_rate.2.weight', 'net.fre1.policy_rate.2.bias', 'net.fre1.policy_fuse.0.weight', 'net.fre1.policy_fuse.2.weight', 'net.fre1.policy_fuse.2.bias', 'net.fre2.policy_rate.0.weight', 'net.fre2.policy_rate.2.weight', 'net.fre2.policy_rate.2.bias', 'net.fre2.policy_fuse.0.weight', 'net.fre2.policy_fuse.2.weight', 'net.fre2.policy_fuse.2.bias', 'net.fre3.policy_rate.0.weight', 'net.fre3.policy_rate.2.weight', 'net.fre3.policy_rate.2.bias', 'net.fre3.policy_fuse.0.weight', 'net.fre3.policy_fuse.2.weight', 'net.fre3.policy_fuse.2.bias', 'lpips_metric.scaling_layer.shift', 'lpips_metric.scaling_layer.scale', 'lpips_metric.net.slice1.0.weight', 'lpips_metric.net.slice1.0.bias', 'lpips_metric.net.slice2.3.weight', 'lpips_metric.net.slice2.3.bias', 'lpips_metric.net.slice3.6.weight', 'lpips_metric.net.slice3.6.bias', 'lpips_metric.net.slice4.8.weight', 'lpips_metric.net.slice4.8.bias', 'lpips_metric.net.slice5.10.weight', 'lpips_metric.net.slice5.10.bias', 'lpips_metric.lin0.model.1.weight', 'lpips_metric.lin1.model.1.weight', 'lpips_metric.lin2.model.1.weight', 'lpips_metric.lin3.model.1.weight', 'lpips_metric.lin4.model.1.weight', 'lpips_metric.lins.0.model.1.weight', 'lpips_metric.lins.1.model.1.weight', 'lpips_metric.lins.2.model.1.weight', 'lpips_metric.lins.3.model.1.weight', 'lpips_metric.lins.4.model.1.weight', 'policy_network.feature_extractor.0.weight', 'policy_network.feature_extractor.0.bias', 'policy_network.feature_extractor.4.weight', 'policy_network.feature_extractor.4.bias', 'policy_network.alpha_head.0.weight', 'policy_network.alpha_head.0.bias', 'policy_network.alpha_head.2.weight', 'policy_network.alpha_head.2.bias', 'policy_network.beta_head.0.weight', 'policy_network.beta_head.0.bias', 'policy_network.beta_head.2.weight', 'policy_network.beta_head.2.bias', 'value_network.0.weight', 'value_network.0.bias', 'value_network.4.weight', 'value_network.4.bias', 'value_network.6.weight', 'value_network.6.bias', 'value_network.8.weight', 'value_network.8.bias']
+  rank_zero_warn(
+[LoRA] Total applied to 0 layers
+[INFO] Applied LoRA to 0 layers (targets=attn,cross_attn, r=16, alpha=16.0)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+IPU available: False, using: 0 IPUs
+HPU available: False, using: 0 HPUs
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/4
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 4 processes
+----------------------------------------------------------------------------------------------------
+
+You are using a CUDA device ('NVIDIA GeForce RTX 4090') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/lightning/pytorch/callbacks/model_checkpoint.py:612: UserWarning: Checkpoint directory torchrl_grpo_4gpu exists and is not empty.
+  rank_zero_warn(f"Checkpoint directory {dirpath} exists and is not empty.")
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+LOCAL_RANK: 2 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+LOCAL_RANK: 1 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+LOCAL_RANK: 3 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/_compile.py:24: UserWarning: optimizer contains a parameter group with duplicate parameters; in future, this will cause an error; see github.com/pytorch/pytorch/issues/40967 for more information
+  return torch._dynamo.disable(fn, recursive)(*args, **kwargs)
+[INFO] TorchRL GRPO optimizer: lr=2.0000000000000003e-06 (更合理设置), params=129/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/_compile.py:24: UserWarning: optimizer contains a parameter group with duplicate parameters; in future, this will cause an error; see github.com/pytorch/pytorch/issues/40967 for more information
+  return torch._dynamo.disable(fn, recursive)(*args, **kwargs)
+
+[INFO] TorchRL GRPO optimizer: lr=2.0000000000000003e-06 (更合理设置), params=129
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/_compile.py:24: UserWarning: optimizer contains a parameter group with duplicate parameters; in future, this will cause an error; see github.com/pytorch/pytorch/issues/40967 for more information
+  return torch._dynamo.disable(fn, recursive)(*args, **kwargs)
+/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/_compile.py:24: UserWarning: optimizer contains a parameter group with duplicate parameters; in future, this will cause an error; see github.com/pytorch/pytorch/issues/40967 for more information
+  return torch._dynamo.disable(fn, recursive)(*args, **kwargs)
+[INFO] TorchRL GRPO optimizer: lr=2.0000000000000003e-06 (更合理设置), params=129
+[INFO] TorchRL GRPO optimizer: lr=2.0000000000000003e-06 (更合理设置), params=129
+
+  | Name           | Type               | Params
+------------------------------------------------------
+0 | net            | AdaIRTorchRL       | 28.8 M
+1 | loss_fn        | L1Loss             | 0     
+2 | ssim_metric    | SSIM               | 0     
+3 | lpips_metric   | LPIPS              | 2.5 M 
+4 | policy_network | AdaIRPolicyNetwork | 2.4 M 
+5 | value_network  | Sequential         | 2.2 M 
+------------------------------------------------------
+33.4 M    Trainable params
+2.5 M     Non-trainable params
+35.9 M    Total params
+143.616   Total estimated model params size (MB)
+Training: 0it [00:00, ?it/s]Training:   0%|          | 0/6627 [00:00<?, ?it/s]Epoch 0:   0%|          | 0/6627 [00:00<?, ?it/s] [INFO] Synced TorchRL components to device: cuda:3
+[INFO] Synced TorchRL components to device: cuda:2
+[INFO] Synced TorchRL components to device: cuda:1
+[INFO] Synced TorchRL components to device: cuda:0
+Epoch 0:   0%|          | 1/6627 [00:02<4:13:45,  2.30s/it]Epoch 0:   0%|          | 1/6627 [00:02<4:13:55,  2.30s/it, v_num=p9vk]Epoch 0:   0%|          | 2/6627 [00:02<2:32:33,  1.38s/it, v_num=p9vk]Epoch 0:   0%|          | 2/6627 [00:02<2:32:38,  1.38s/it, v_num=p9vk]Epoch 0:   0%|          | 3/6627 [00:03<1:58:11,  1.07s/it, v_num=p9vk]Epoch 0:   0%|          | 3/6627 [00:03<1:58:13,  1.07s/it, v_num=p9vk]Epoch 0:   0%|          | 4/6627 [00:03<1:40:51,  1.09it/s, v_num=p9vk]Epoch 0:   0%|          | 4/6627 [00:03<1:40:52,  1.09it/s, v_num=p9vk]Epoch 0:   0%|          | 5/6627 [00:04<1:30:27,  1.22it/s, v_num=p9vk]Epoch 0:   0%|          | 5/6627 [00:04<1:30:28,  1.22it/s, v_num=p9vk]Epoch 0:   0%|          | 6/6627 [00:04<1:23:25,  1.32it/s, v_num=p9vk]Epoch 0:   0%|          | 6/6627 [00:04<1:23:27,  1.32it/s, v_num=p9vk]Epoch 0:   0%|          | 7/6627 [00:04<1:18:25,  1.41it/s, v_num=p9vk]Epoch 0:   0%|          | 7/6627 [00:04<1:18:26,  1.41it/s, v_num=p9vk]Epoch 0:   0%|          | 8/6627 [00:05<1:14:41,  1.48it/s, v_num=p9vk]Epoch 0:   0%|          | 8/6627 [00:05<1:14:42,  1.48it/s, v_num=p9vk]Epoch 0:   0%|          | 9/6627 [00:05<1:11:42,  1.54it/s, v_num=p9vk]Epoch 0:   0%|          | 9/6627 [00:05<1:11:43,  1.54it/s, v_num=p9vk]Epoch 0:   0%|          | 10/6627 [00:06<1:09:17,  1.59it/s, v_num=p9vk]Epoch 0:   0%|          | 10/6627 [00:06<1:09:18,  1.59it/s, v_num=p9vk]Epoch 0:   0%|          | 11/6627 [00:06<1:07:30,  1.63it/s, v_num=p9vk]Epoch 0:   0%|          | 11/6627 [00:06<1:07:31,  1.63it/s, v_num=p9vk]Epoch 0:   0%|          | 12/6627 [00:07<1:05:52,  1.67it/s, v_num=p9vk]Epoch 0:   0%|          | 12/6627 [00:07<1:05:53,  1.67it/s, v_num=p9vk]Epoch 0:   0%|          | 13/6627 [00:07<1:04:33,  1.71it/s, v_num=p9vk]Epoch 0:   0%|          | 13/6627 [00:07<1:04:33,  1.71it/s, v_num=p9vk]Epoch 0:   0%|          | 14/6627 [00:08<1:03:25,  1.74it/s, v_num=p9vk]Epoch 0:   0%|          | 14/6627 [00:08<1:03:25,  1.74it/s, v_num=p9vk]Epoch 0:   0%|          | 15/6627 [00:08<1:02:40,  1.76it/s, v_num=p9vk]Epoch 0:   0%|          | 15/6627 [00:08<1:02:40,  1.76it/s, v_num=p9vk]Epoch 0:   0%|          | 16/6627 [00:08<1:01:53,  1.78it/s, v_num=p9vk]Epoch 0:   0%|          | 16/6627 [00:08<1:01:53,  1.78it/s, v_num=p9vk]Epoch 0:   0%|          | 17/6627 [00:09<1:01:22,  1.80it/s, v_num=p9vk]Epoch 0:   0%|          | 17/6627 [00:09<1:01:23,  1.79it/s, v_num=p9vk]Epoch 0:   0%|          | 18/6627 [00:09<1:00:39,  1.82it/s, v_num=p9vk]Epoch 0:   0%|          | 18/6627 [00:09<1:00:39,  1.82it/s, v_num=p9vk]Epoch 0:   0%|          | 19/6627 [00:10<1:00:01,  1.84it/s, v_num=p9vk]Epoch 0:   0%|          | 19/6627 [00:10<1:00:01,  1.83it/s, v_num=p9vk]Epoch 0:   0%|          | 20/6627 [00:10<59:27,  1.85it/s, v_num=p9vk]  Epoch 0:   0%|          | 20/6627 [00:10<59:27,  1.85it/s, v_num=p9vk]Epoch 0:   0%|          | 21/6627 [00:11<58:57,  1.87it/s, v_num=p9vk]Epoch 0:   0%|          | 21/6627 [00:11<58:57,  1.87it/s, v_num=p9vk]Epoch 0:   0%|          | 22/6627 [00:11<58:42,  1.88it/s, v_num=p9vk]Epoch 0:   0%|          | 22/6627 [00:11<58:42,  1.87it/s, v_num=p9vk]Epoch 0:   0%|          | 23/6627 [00:12<58:12,  1.89it/s, v_num=p9vk]Epoch 0:   0%|          | 23/6627 [00:12<58:12,  1.89it/s, v_num=p9vk]Epoch 0:   0%|          | 24/6627 [00:12<57:44,  1.91it/s, v_num=p9vk]Epoch 0:   0%|          | 24/6627 [00:12<57:45,  1.91it/s, v_num=p9vk]Epoch 0:   0%|          | 25/6627 [00:13<57:23,  1.92it/s, v_num=p9vk]Epoch 0:   0%|          | 25/6627 [00:13<57:23,  1.92it/s, v_num=p9vk]Epoch 0:   0%|          | 26/6627 [00:13<57:06,  1.93it/s, v_num=p9vk]Epoch 0:   0%|          | 26/6627 [00:13<57:07,  1.93it/s, v_num=p9vk]Epoch 0:   0%|          | 27/6627 [00:13<56:48,  1.94it/s, v_num=p9vk]Epoch 0:   0%|          | 27/6627 [00:13<56:49,  1.94it/s, v_num=p9vk]Epoch 0:   0%|          | 28/6627 [00:14<56:30,  1.95it/s, v_num=p9vk]Epoch 0:   0%|          | 28/6627 [00:14<56:30,  1.95it/s, v_num=p9vk]Epoch 0:   0%|          | 29/6627 [00:14<56:12,  1.96it/s, v_num=p9vk]Epoch 0:   0%|          | 29/6627 [00:14<56:12,  1.96it/s, v_num=p9vk]Epoch 0:   0%|          | 30/6627 [00:15<55:58,  1.96it/s, v_num=p9vk]Epoch 0:   0%|          | 30/6627 [00:15<55:58,  1.96it/s, v_num=p9vk]Epoch 0:   0%|          | 31/6627 [00:15<55:43,  1.97it/s, v_num=p9vk]Epoch 0:   0%|          | 31/6627 [00:15<55:44,  1.97it/s, v_num=p9vk]Epoch 0:   0%|          | 32/6627 [00:16<55:29,  1.98it/s, v_num=p9vk]Epoch 0:   0%|          | 32/6627 [00:16<55:29,  1.98it/s, v_num=p9vk][2025-08-22 21:09:27,439] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 659780 closing signal SIGTERM
+[2025-08-22 21:09:27,439] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 659781 closing signal SIGTERM
+[2025-08-22 21:09:27,440] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 659782 closing signal SIGTERM
+[2025-08-22 21:09:54,919] torch.distributed.elastic.multiprocessing.api: [ERROR] failed (exitcode: -9) local_rank: 3 (pid: 659783) of binary: /home/haoxuan1/.conda/envs/adair/bin/python
+Traceback (most recent call last):
+  File "/home/haoxuan1/.conda/envs/adair/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.1.2', 'console_scripts', 'torchrun')())
+  File "/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/distributed/run.py", line 806, in main
+    run(args)
+  File "/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/distributed/run.py", line 797, in run
+    elastic_launch(
+  File "/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/haoxuan1/.conda/envs/adair/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 264, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+=======================================================
+/data2/haoxuan/AdaIR/train.py FAILED
+-------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+-------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-08-22_21:09:27
+  host      : bld-P504-S2
+  rank      : 3 (local_rank: 3)
+  exitcode  : -9 (pid: 659783)
+  error_file: <N/A>
+  traceback : Signal 9 (SIGKILL) received by PID 659783
+=======================================================

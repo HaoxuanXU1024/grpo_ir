@@ -15,16 +15,62 @@ from utils.dataset_utils import DenoiseTestDataset, DerainDehazeDataset
 from utils.val_utils import AverageMeter, compute_psnr_ssim
 from utils.image_io import save_image_tensor
 from net.model import AdaIR
+from net.model_torchrl import AdaIRTorchRL
+from grpo_torchrl_env import AdaIRPolicyNetwork
+try:
+    from tensordict import TensorDict
+except ImportError:
+    print("Warning: tensordict not found. Run 'pip install tensordict'")
+    TensorDict = None
 
 
 class AdaIRModel(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, grpo_enabled=False):
         super().__init__()
-        self.net = AdaIR(decoder=True)
+        self.grpo_enabled = grpo_enabled
+        if self.grpo_enabled:
+            print("INFO: Initializing model with TorchRL GRPO components for testing.")
+            if TensorDict is None:
+                raise ImportError("tensordict is required for GRPO evaluation. Please install it.")
+            self.net = AdaIRTorchRL(decoder=True)
+            self.policy_network = AdaIRPolicyNetwork()
+            # A value_network is also part of the saved checkpoint, so we must define it here to load weights,
+            # even if it's not used during inference.
+            self.value_network = nn.Sequential(
+                nn.Conv2d(3, 64, 3, padding=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((8, 8)),
+                nn.Flatten(),
+                nn.Linear(64 * 8 * 8, 512),
+                nn.ReLU(),
+                nn.Linear(512, 256),
+                nn.ReLU(),
+                nn.Linear(256, 1),
+            )
+        else:
+            self.net = AdaIR(decoder=True)
         self.loss_fn  = nn.L1Loss()
     
     def forward(self,x):
-        return self.net(x)
+        if self.grpo_enabled:
+            # Use the trained policy network to determine the adaptive parameters
+            obs = TensorDict({"degraded_image": x}, batch_size=x.shape[:1], device=x.device)
+            
+            # The policy network is deterministic at inference time; it outputs distribution parameters
+            with torch.no_grad():
+                action_td = self.policy_network(obs)
+            freq_params = action_td["action"]["freq_params"]
+            
+            # Inject these parameters into the main network
+            self.net.inject_policy_params(freq_params)
+            
+            # Run the forward pass in stochastic mode to make it use the injected parameters
+            # The model returns a tuple (restored_image, log_prob) in this mode
+            restored, _ = self.net(x, stochastic=True)
+            return restored
+        else:
+            # Original deterministic forward pass
+            return self.net(x)
     
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
@@ -280,7 +326,8 @@ if __name__ == '__main__':
     parser.add_argument('--dehaze_path', type=str, default="data/test/dehaze/", help='save path of test hazy images')
 
     parser.add_argument('--output_path', type=str, default="AdaIR_results1/", help='output save path')
-    parser.add_argument('--ckpt_name', type=str, default="epoch=49-step=94700.ckpt", help='checkpoint save path')
+    parser.add_argument('--ckpt_name', type=str, default="adair5d.ckpt", help='checkpoint save path')
+    parser.add_argument('--grpo_torchrl_ckpt', action='store_true', help='Set this flag if loading a GRPO+TorchRL fine-tuned checkpoint')
     # 训练集评测与导出 CSV
     parser.add_argument('--eval_train', action='store_true', help='Evaluate training data and export CSV metrics')
     parser.add_argument('--train_task', type=str, default='all', choices=['all','derain','dehaze','deblur','enhance','denoise'], help='Which train subset to evaluate')
@@ -298,7 +345,8 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     torch.cuda.set_device(testopt.cuda)
 
-    ckpt_path = "ckpt/" + testopt.ckpt_name
+    # ckpt_path = "ckpt/" + testopt.ckpt_name
+    ckpt_path = "/data2/haoxuan/AdaIR/flow_grpo_4gpu/epoch=30-step=57660.ckpt"
 
     denoise_splits = ["bsd68/"]
     derain_splits = ["Rain100L/"]
@@ -317,7 +365,14 @@ if __name__ == '__main__':
     print("CKPT name : {}".format(ckpt_path))
 
     # 由于新增了 GRPO 的策略头，旧版 ckpt 中没有这些键，使用 strict=False 以兼容加载
-    net  = AdaIRModel().load_from_checkpoint(ckpt_path, strict=False).cuda()
+    print(f"Loading checkpoint: {ckpt_path}")
+    if testopt.grpo_torchrl_ckpt:
+        print("INFO: Loading as a GRPO+TorchRL fine-tuned model.")
+    net = AdaIRModel.load_from_checkpoint(
+        ckpt_path,
+        strict=False,
+        grpo_enabled=testopt.grpo_torchrl_ckpt
+    ).cuda()
     net.eval()
 
     # 评测训练集并导出 CSV（可与常规 test 并存）

@@ -36,6 +36,7 @@ parser.add_argument("--num_gpus",type=int,default= 4, help = "Number of GPUs to 
 # GRPO fine-tuning options
 parser.add_argument('--grpo', action='store_true', help='Enable GRPO fine-tuning with stochastic low-dim actions')
 parser.add_argument('--grpo_torchrl', action='store_true', help='Use TorchRL framework for GRPO (more stable PPO implementation)')
+parser.add_argument('--grpo_flow_style', action='store_true', help='Use flow-grpo style per-prompt advantage normalization')
 parser.add_argument('--grpo_group', type=int, default=4, help='Group size (number of stochastic samples per input)')
 parser.add_argument('--grpo_lambda_sup', type=float, default=0.1, help='Weight for supervised L1 stabilization')
 parser.add_argument('--grpo_lambda_consistency', type=float, default=0.05, help='Weight for consistency to deterministic output')
