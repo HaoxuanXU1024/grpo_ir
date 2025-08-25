@@ -233,3 +233,8 @@ grpo_improved/
 *.swp
 *.swo
 *~
+
+# allow pushing worst_lists_adair5d even if results are ignored
+!AdaIR_results/
+!AdaIR_results/worst_lists_adair5d/
+!AdaIR_results/worst_lists_adair5d/**
