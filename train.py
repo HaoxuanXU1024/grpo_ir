@@ -166,9 +166,8 @@ class AdaIRModel(pl.LightningModule):
             advantages = (rewards - mean_rewards) / std_rewards
             advantages_flat = advantages.view(-1) # [B*G]
 
-            # 5. Policy gradient loss with PPO-style clipping
-            old_lp = lp.detach()
-            pg_loss = self.compute_policy_loss_ppo(lp, old_lp, advantages_flat.detach())
+            # 5. 纯GRPO策略梯度（无PPO剪裁/ratio）：REINFORCE with group-normalized advantages
+            pg_loss = -(advantages_flat.detach() * lp).mean()
 
             # 6. Stabilization losses (optional but recommended)
             sup_loss = self.loss_fn(out, repeated_clean) # Supervised loss on all samples
@@ -181,14 +180,11 @@ class AdaIRModel(pl.LightningModule):
             loss = pg_loss + opt.grpo_lambda_sup * sup_loss + opt.grpo_lambda_consistency * cons_loss
 
             self.log_dict({
-                "flow_grpo_pg_loss": pg_loss,
-                "flow_grpo_sup_loss": sup_loss,
-                "flow_grpo_cons_loss": cons_loss,
-                "flow_grpo_train_loss": loss,
-                "flow_grpo_advantages_mean": advantages.mean(),
-                "flow_grpo_advantages_std": advantages.std(),
-                "flow_grpo_rewards_mean": rewards.mean(),
-                "flow_grpo_rewards_std": rewards.std(),
+                "policy_loss": pg_loss,
+                "supervised_loss": sup_loss,
+                "total_loss": loss,
+                "reward_mean": rewards.mean(),
+                "advantage_mean": advantages.mean(),
             })
             return loss
         else:
@@ -256,10 +252,9 @@ class AdaIRModel(pl.LightningModule):
             # Clip advantages for stability
             advantages = torch.clamp(advantages, -opt.grpo_adv_clip_max, opt.grpo_adv_clip_max)
             
-            # Policy gradient with PPO-style clipped loss
+            # 纯GRPO策略梯度（无PPO剪裁/ratio）
             logps = torch.stack(lps, dim=1)  # [B, G]
-            old_logps = logps.detach()  # Use current logps as "old" for first iteration
-            pg_loss = self.compute_policy_loss_ppo(logps, old_logps, advantages.detach())
+            pg_loss = -(advantages.detach() * logps).mean()
 
             # Stabilizers: supervised L1 on best sample + consistency to deterministic baseline
             # pick best per-sample by reward
@@ -293,21 +288,14 @@ class AdaIRModel(pl.LightningModule):
 
             loss = lambda_pg * pg_loss + lambda_sup * sup_loss + lambda_cons * cons_loss + opt.grpo_beta_kl * kl_loss
             
-            # Comprehensive logging for monitoring training stability
+            # 精简日志记录 - 只保留核心指标
             self.log_dict({
-                "loss_pg": pg_loss,
-                "loss_sup": sup_loss,
-                "loss_cons": cons_loss,
-                "loss_kl": kl_loss,
-                "train_loss": loss,
-                "advantages_mean": advantages.mean(),
-                "advantages_std": advantages.std(),
-                "rewards_mean": rewards.mean(),
-                "rewards_std": rewards.std(),
+                "policy_loss": pg_loss,
+                "supervised_loss": sup_loss,
+                "total_loss": loss,
+                "reward_mean": rewards.mean(),
+                "advantage_mean": advantages.mean(),
                 "lambda_sup": lambda_sup,
-                "lambda_pg": lambda_pg,
-                "global_reward_mean": self.running_reward_mean,
-                "global_reward_std": self.running_reward_var.sqrt(),
             })
             return loss
     
@@ -316,91 +304,154 @@ class AdaIRModel(pl.LightningModule):
         lr = scheduler.get_lr()
     
     def configure_optimizers(self):
-        # TorchRL GRPO: Optimize policy and value networks
+        # TorchRL GRPO: 参数组提升策略相关学习率
         if opt.grpo_torchrl:
-            params = []
-            
-            if opt.train_policy_only:
-                # Add policy network and value network params
-                params.extend(list(self.policy_network.parameters()))
-                params.extend(list(self.value_network.parameters()))
-                
-                # Add FreModule policy heads
-                for m in self.net.modules():
-                    name = m.__class__.__name__
-                    if name == 'FreModule':
-                        for subn, p in m.named_parameters():
-                            if subn.startswith('policy_rate') or subn.startswith('policy_fuse'):
-                                params.append(p)
-                
-                # Add LoRA params if wrapped
-                if opt.lora:
-                    for m in self.net.modules():
-                        if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
-                            params.extend(list(m.down.parameters()))
-                            params.extend(list(m.up.parameters()))
-                
-                # Cautiously add more parameters for better fine-tuning
-                # 1. Add LayerNorm parameters from decoder and refinement layers
-                for name, module in self.net.named_modules():
-                    if any(decoder_name in name for decoder_name in ['decoder_level1', 'refinement']):
-                        if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
-                            params.extend(list(module.parameters()))
-                
-                # 2. Add the final output layer parameters
-                params.extend(list(self.net.output.parameters()))
-                
-                # 3. Add refinement layer parameters (safe to fine-tune)
-                params.extend(list(self.net.refinement.parameters()))
-            else:
-                params = list(self.parameters())
-            
-            # 修复学习率：使用更合理的学习率设置以允许有效更新
-            if opt.lr > 0:
-                lr = opt.lr * 0.1  # 适度降低，如2e-4 * 0.1 = 2e-5，保持有效更新
-            else:
-                lr = 2e-5  # 使用更合理的默认学习率
-            
-            optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-4)
-            print(f"[INFO] TorchRL GRPO optimizer: lr={lr} (更合理设置), params={len(params)}")
-        
-        # Original GRPO or standard training
-        elif opt.train_policy_only:
-            policy_params = []
+            def unique_params(param_list):
+                seen = set()
+                uniq = []
+                for p in param_list:
+                    if id(p) not in seen:
+                        uniq.append(p)
+                        seen.add(id(p))
+                return uniq
+
+            policy_params = list(self.policy_network.parameters()) if hasattr(self, 'policy_network') else []
+            value_params = list(self.value_network.parameters()) if hasattr(self, 'value_network') else []
+
+            fre_head_params = []
             for m in self.net.modules():
-                name = m.__class__.__name__
-                if name == 'FreModule':
+                if m.__class__.__name__ == 'FreModule':
+                    for name, p in m.named_parameters():
+                        if name.startswith('policy_rate') or name.startswith('policy_fuse'):
+                            fre_head_params.append(p)
+
+            lora_params = []
+            if opt.lora:
+                for m in self.net.modules():
+                    if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
+                        lora_params.extend(list(m.down.parameters()))
+                        lora_params.extend(list(m.up.parameters()))
+
+            norm_refine_params = []
+            for name, module in self.net.named_modules():
+                if any(dec_name in name for dec_name in ['decoder_level1', 'refinement']):
+                    if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
+                        norm_refine_params.extend(list(module.parameters()))
+
+            output_params = list(self.net.output.parameters()) if hasattr(self.net, 'output') else []
+
+            # 去重
+            policy_params = unique_params(policy_params)
+            value_params = unique_params(value_params)
+            fre_head_params = unique_params(fre_head_params)
+            lora_params = unique_params(lora_params)
+            norm_refine_params = unique_params(norm_refine_params)
+            output_params = unique_params(output_params)
+
+            base_lr = opt.lr if getattr(opt, 'lr', 0) > 0 else 5e-5
+            lr_policy = max(base_lr * 8.0, 3e-4)
+            lr_value = max(base_lr * 4.0, 1e-4)
+            lr_heads = max(base_lr * 6.0, 1e-4)
+            lr_mid = max(base_lr * 2.0, 5e-5)
+
+            param_groups = []
+            if opt.train_policy_only:
+                if len(policy_params) > 0:
+                    param_groups.append({'params': policy_params, 'lr': lr_policy})
+                if len(fre_head_params) > 0:
+                    param_groups.append({'params': fre_head_params, 'lr': lr_heads})
+                if len(lora_params) > 0:
+                    param_groups.append({'params': lora_params, 'lr': lr_mid})
+                if len(norm_refine_params) > 0:
+                    param_groups.append({'params': norm_refine_params, 'lr': lr_mid})
+                if len(output_params) > 0:
+                    param_groups.append({'params': output_params, 'lr': lr_mid})
+                if len(value_params) > 0:
+                    param_groups.append({'params': value_params, 'lr': lr_value})
+            else:
+                # 全参数微调：策略相关仍然更高LR，其余使用base_lr
+                all_rest = []
+                used = {id(p) for group in [policy_params, value_params, fre_head_params, lora_params, norm_refine_params, output_params] for p in group}
+                for p in self.parameters():
+                    if id(p) not in used:
+                        all_rest.append(p)
+                if len(policy_params) > 0:
+                    param_groups.append({'params': policy_params, 'lr': lr_policy})
+                if len(fre_head_params) > 0:
+                    param_groups.append({'params': fre_head_params, 'lr': lr_heads})
+                if len(value_params) > 0:
+                    param_groups.append({'params': value_params, 'lr': lr_value})
+                if len(lora_params) > 0:
+                    param_groups.append({'params': lora_params, 'lr': lr_mid})
+                if len(norm_refine_params) > 0:
+                    param_groups.append({'params': norm_refine_params, 'lr': lr_mid})
+                if len(output_params) > 0:
+                    param_groups.append({'params': output_params, 'lr': lr_mid})
+                if len(all_rest) > 0:
+                    param_groups.append({'params': unique_params(all_rest), 'lr': base_lr})
+
+            optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+            print(f"[INFO] TorchRL GRPO optimizer with param groups: policy={lr_policy}, fre_heads={lr_heads}, value={lr_value}, mid={lr_mid}, base={base_lr}")
+
+        # Original GRPO or standard（非TorchRL）
+        elif opt.train_policy_only:
+            def unique_params(param_list):
+                seen = set()
+                uniq = []
+                for p in param_list:
+                    if id(p) not in seen:
+                        uniq.append(p)
+                        seen.add(id(p))
+                return uniq
+
+            fre_head_params = []
+            for m in self.net.modules():
+                if m.__class__.__name__ == 'FreModule':
                     for subn, p in m.named_parameters():
                         if subn.startswith('policy_rate') or subn.startswith('policy_fuse'):
-                            policy_params.append(p)
-                # Collect LoRA params if wrapped
-                if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
-                    for p in m.down.parameters():
-                        policy_params.append(p)
-                    for p in m.up.parameters():
-                        policy_params.append(p)
-            
-            # Cautiously add more parameters for better fine-tuning
-            # 1. Add LayerNorm parameters from decoder and refinement layers
+                            fre_head_params.append(p)
+
+            lora_params = []
+            if opt.lora:
+                for m in self.net.modules():
+                    if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
+                        lora_params.extend(list(m.down.parameters()))
+                        lora_params.extend(list(m.up.parameters()))
+
+            norm_refine_params = []
             for name, module in self.net.named_modules():
-                if any(decoder_name in name for decoder_name in ['decoder_level1', 'refinement']):
+                if any(dec_name in name for dec_name in ['decoder_level1', 'refinement']):
                     if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
-                        policy_params.extend(list(module.parameters()))
-            
-            # 2. Add the final output layer parameters
-            policy_params.extend(list(self.net.output.parameters()))
-            
-            # 3. Add refinement layer parameters (safe to fine-tune)
-            policy_params.extend(list(self.net.refinement.parameters()))
-            
-            # Use lower learning rate for GRPO training
-            lr = opt.lr if not opt.grpo else opt.lr * 0.1
-            optimizer = optim.AdamW(policy_params, lr=lr, weight_decay=1e-4)
+                        norm_refine_params.extend(list(module.parameters()))
+
+            output_params = list(self.net.output.parameters()) if hasattr(self.net, 'output') else []
+
+            fre_head_params = unique_params(fre_head_params)
+            lora_params = unique_params(lora_params)
+            norm_refine_params = unique_params(norm_refine_params)
+            output_params = unique_params(output_params)
+
+            base_lr = opt.lr if getattr(opt, 'lr', 0) > 0 else 5e-5
+            lr_heads = max(base_lr * 8.0, 1e-4)
+            lr_mid = max(base_lr * 2.0, 5e-5)
+
+            param_groups = []
+            if len(fre_head_params) > 0:
+                param_groups.append({'params': fre_head_params, 'lr': lr_heads})
+            if len(lora_params) > 0:
+                param_groups.append({'params': lora_params, 'lr': lr_mid})
+            if len(norm_refine_params) > 0:
+                param_groups.append({'params': norm_refine_params, 'lr': lr_mid})
+            if len(output_params) > 0:
+                param_groups.append({'params': output_params, 'lr': lr_mid})
+
+            optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+            print(f"[INFO] GRPO optimizer (policy-only) with param groups: fre_heads={lr_heads}, mid={lr_mid}")
         else:
-            lr = 2e-4 if not opt.grpo else 5e-6  # Much lower LR for GRPO
-            optimizer = optim.AdamW(self.parameters(), lr=lr, weight_decay=1e-4)
-            
-        # Adjust scheduler for GRPO training
+            base_lr = opt.lr if not opt.grpo and getattr(opt, 'lr', 0) > 0 else 5e-5
+            optimizer = optim.AdamW(self.parameters(), lr=base_lr, weight_decay=1e-4)
+
+        # 调整scheduler：GRPO使用更长预热
         if opt.grpo:
             # Use linear warmup + cosine annealing with longer warmup for GRPO
             warmup_epochs = max(opt.grpo_warmup_epochs, 15)
@@ -473,15 +524,32 @@ class AdaIRModel(pl.LightningModule):
         # 获取正确的设备
         current_device = next(self.parameters()).device
         
-        # 创建TorchRL环境包装器
-        self.grpo_env = AdaIRGRPOEnv(
-            batch_size=opt.batch_size,
-            device=current_device,
-            reward_weights={
+        # 检查是否使用高级奖励系统
+        use_advanced_rewards = getattr(opt, 'use_advanced_rewards', True)
+        
+        if use_advanced_rewards:
+            # 使用高级奖励系统 - 平衡传统指标和先进指标
+            reward_weights = {
+                "clip_similarity": getattr(opt, 'grpo_w_clip', 0.25),
+                "perceptual": getattr(opt, 'grpo_w_perceptual', 0.25), 
+                "aesthetic": getattr(opt, 'grpo_w_aesthetic', 0.15),
+                "psnr": getattr(opt, 'grpo_w_psnr_adv', 0.20),
+                "ssim": getattr(opt, 'grpo_w_ssim_adv', 0.15),
+            }
+        else:
+            # 使用原始奖励系统
+            reward_weights = {
                 "psnr": opt.grpo_w_psnr,
                 "ssim": opt.grpo_w_ssim,
                 "lpips": opt.grpo_w_lpips
             }
+        
+        # 创建TorchRL环境包装器
+        self.grpo_env = AdaIRGRPOEnv(
+            batch_size=opt.batch_size,
+            device=current_device,
+            reward_weights=reward_weights,
+            use_advanced_rewards=use_advanced_rewards
         )
         self.grpo_env.adair_model = self.net  # 使用主模型
         
@@ -504,7 +572,7 @@ class AdaIRModel(pl.LightningModule):
         print("[INFO] TorchRL GRPO components initialized")
     
     def torchrl_grpo_step(self, degrad_patch, clean_patch):
-        """TorchRL GRPO训练步骤 - 修正版PPO实现"""
+        """TorchRL GRPO训练步骤 - 纯GRPO（组采样+相对优势，无PPO剪裁）"""
         # 获取正确的设备
         current_device = next(self.parameters()).device
         
@@ -535,150 +603,104 @@ class AdaIRModel(pl.LightningModule):
             "clean_image": clean_patch,
         }, batch_size=degrad_patch.shape[:1], device=current_device)
         
-        # === 策略采样与概率计算 ===
-        action_td = self.policy_network(obs)
-        raw_params = action_td["action"]["freq_params"]  # [B, 3, 8]
-        
-        # 修复维度处理：将24个参数转换为正确的Beta分布参数
-        # 每个FreModule有4对(alpha,beta)，共12对
-        batch_size = raw_params.shape[0]
-        
-        # 重新整形：[B, 3, 8] -> [B, 24] -> [B, 12, 2]
-        reshaped_params = raw_params.view(batch_size, -1)  # [B, 24]
-        alpha_beta_pairs = reshaped_params.view(batch_size, 12, 2)  # [B, 12, 2]
-        
-        # 确保alpha, beta > 0 (Beta分布要求)
-        alphas = F.softplus(alpha_beta_pairs[..., 0]) + 1.0  # [B, 12] 
-        betas = F.softplus(alpha_beta_pairs[..., 1]) + 1.0   # [B, 12]
-        
-        # 创建Beta分布
-        policy_dist = Beta(alphas, betas)
-        
-        # 从分布中采样动作
-        sampled_actions = policy_dist.rsample()  # [B, 12], use rsample for reparameterization trick
-        
-        # 计算当前策略的log概率
-        current_log_probs = policy_dist.log_prob(sampled_actions).sum(dim=-1)  # [B]
-        
-        # === 获取或初始化old_log_probs ===
-        # 使用目标网络方法：维护一个缓慢更新的"旧"策略网络
-        
-        if not hasattr(self, '_target_policy_network'):
-            # 创建目标策略网络（旧策略的拷贝）
-            import copy
-            self._target_policy_network = copy.deepcopy(self.policy_network).to(current_device)
-            self._target_policy_network.eval()
-        
-        # 软更新目标网络 (每个step都更新)
-        tau = 0.005 # Common soft update factor
-        for target_param, current_param in zip(self._target_policy_network.parameters(), 
-                                               self.policy_network.parameters()):
-            target_param.data.copy_(tau * current_param.data + (1.0 - tau) * target_param.data)
-        
-        # 使用目标网络计算old_log_probs
-        with torch.no_grad():
-            old_action_td = self._target_policy_network(obs)
-            old_raw_params = old_action_td["action"]["freq_params"]
-            
-            # 重新计算old分布参数
-            old_reshaped = old_raw_params.view(batch_size, -1)
-            old_alpha_beta = old_reshaped.view(batch_size, 12, 2)
-            old_alphas = F.softplus(old_alpha_beta[..., 0]) + 1.0
-            old_betas = F.softplus(old_alpha_beta[..., 1]) + 1.0
-            old_policy_dist = Beta(old_alphas, old_betas)
-            
-            # 使用相同的采样动作计算old_log_probs
-            old_log_probs = old_policy_dist.log_prob(sampled_actions).sum(dim=-1)
-        
-        # 将采样的动作重新整形为FreModule期望的格式
-        # sampled_actions: [B, 12] -> [B, 3, 4]
-        # 每个FreModule得到4个动作值 (r_h, r_w, g1, g2)
-        actions_reshaped = sampled_actions.view(batch_size, 3, 4)
-        
-        # === 环境步进 ===
-        env_input = TensorDict({
-            **obs, 
-            "action": TensorDict({
-                "actions": actions_reshaped # 使用新的key和正确的shape
-            }, batch_size=degrad_patch.shape[:1])
-        }, batch_size=degrad_patch.shape[:1], device=current_device)
-        
-        next_obs_td = self.grpo_env.step(env_input)
-        
-        # === 价值估计 ===
-        values = self.value_network(degrad_patch).squeeze(-1)
-        
-        # === 奖励与优势计算 (GAE) ===
-        rewards = next_obs_td["reward"].squeeze(-1)
-        dones = next_obs_td["done"].squeeze(-1).float()
-        
-        # 使用GAE计算优势和回报
-        advantages, returns = self._compute_gae(rewards, values.detach(), dones)
-        
-        # 归一化优势
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # === PPO损失计算 ===
-        # 计算重要性采样比率
-        ratio = torch.exp(current_log_probs - old_log_probs.detach())
-        
-        # PPO clipped objective
-        clip_range = opt.grpo_clip_range
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
-        
-        # === 价值损失 ===
-        # 使用GAE计算的returns作为目标
-        value_loss = F.mse_loss(values, returns)
-        
-        # === 熵正则化（鼓励探索）===
-        entropy = policy_dist.entropy().mean()
-        entropy_loss = -0.01 * entropy # 使用较小的熵系数
-        
-        # === 监督损失（稳定项）===
+        # === 组采样：每个样本采样G次动作，计算组内相对优势 ===
+        G = getattr(opt, 'grpo_group', 4)
+        batch_size = degrad_patch.shape[0]
+
+        all_log_probs = []  # [G, B]
+        all_rewards = []    # [G, B]
+        restored_images = []  # list of [B, C, H, W]
+
+        for _ in range(G):
+            action_td = self.policy_network(obs)
+            raw_params = action_td["action"]["freq_params"]  # [B, 3, 8]
+            cur_bs = raw_params.shape[0]
+            reshaped_params = raw_params.view(cur_bs, -1)  # [B, 24]
+            alpha_beta_pairs = reshaped_params.view(cur_bs, 12, 2)
+            alphas = F.softplus(alpha_beta_pairs[..., 0]) + 1.0
+            betas = F.softplus(alpha_beta_pairs[..., 1]) + 1.0
+            policy_dist = Beta(alphas, betas)
+            sampled_actions = policy_dist.rsample()  # [B, 12]
+            log_prob = policy_dist.log_prob(sampled_actions).sum(dim=-1)  # [B]
+
+            actions_reshaped = sampled_actions.view(cur_bs, 3, 4)
+            env_input = TensorDict({
+                **obs,
+                "action": TensorDict({
+                    "actions": actions_reshaped
+                }, batch_size=degrad_patch.shape[:1])
+            }, batch_size=degrad_patch.shape[:1], device=current_device)
+
+            next_obs_td = self.grpo_env.step(env_input)
+            reward_g = next_obs_td["reward"].squeeze(-1)  # [B]
+            restored_g = next_obs_td["restored_image"]    # [B, C, H, W]
+
+            all_log_probs.append(log_prob)
+            all_rewards.append(reward_g)
+            restored_images.append(restored_g)
+
+        logps = torch.stack(all_log_probs, dim=1)   # [B, G]
+        rewards = torch.stack(all_rewards, dim=1)   # [B, G]
+
+        # 组内标准化优势（GRPO核心）
+        mean = rewards.mean(dim=1, keepdim=True)
+        std = rewards.std(dim=1, keepdim=True) + 1e-8
+        advantages = (rewards - mean) / std
+
+        # 纯GRPO策略梯度
+        policy_loss = -(advantages.detach() * logps).mean()
+
+        # 监督/一致性：使用每样本最佳reward对应的输出
         with torch.no_grad():
             det_output = self.net(degrad_patch)
-        restored_image = next_obs_td["restored_image"]
-        sup_loss = self.loss_fn(restored_image, clean_patch)
-        cons_loss = self.loss_fn(restored_image, det_output)
-        
-        # === 总损失 ===
-        total_loss = (policy_loss + 
-                     0.5 * value_loss +
-                     entropy_loss +
-                     opt.grpo_lambda_sup * sup_loss + 
-                     opt.grpo_lambda_consistency * cons_loss)
-        
-        # PPO训练不需要手动更新old_log_probs，它们在每个batch开始时自动重置
-        
-        # === 详细日志记录 ===
+        best_idx = torch.argmax(rewards, dim=1)  # [B]
+        best_out = torch.stack([restored_images[g][i] for i, g in enumerate(best_idx.tolist())], dim=0)
+        sup_loss = self.loss_fn(best_out, clean_patch)
+        cons_loss = self.loss_fn(best_out, det_output)
+
+        # 熵正则（鼓励探索）：用最近一次分布的平均熵近似
+        entropy = 0.0
+        try:
+            entropy = policy_dist.entropy().mean()
+        except Exception:
+            pass
+        entropy_loss = -0.01 * entropy if isinstance(entropy, torch.Tensor) else 0.0
+
+        total_loss = policy_loss + entropy_loss + opt.grpo_lambda_sup * sup_loss + opt.grpo_lambda_consistency * cons_loss
+
         self.log_dict({
-            "torchrl_policy_loss": policy_loss,
-            "torchrl_value_loss": value_loss,
-            "torchrl_entropy_loss": entropy_loss,
-            "torchrl_entropy": entropy,
-            "torchrl_sup_loss": sup_loss,
-            "torchrl_cons_loss": cons_loss,
-            "torchrl_total_loss": total_loss,
-            "torchrl_reward_mean": rewards.mean(),
-            "torchrl_advantages_mean": advantages.mean(),
-            "torchrl_returns_mean": returns.mean(),
-            "torchrl_ratio_mean": ratio.mean(),
-            "torchrl_current_log_probs_mean": current_log_probs.mean(),
-            "torchrl_old_log_probs_mean": old_log_probs.mean(),
-            "torchrl_alpha_mean": alphas.mean(),
-            "torchrl_beta_mean": betas.mean(),
+            "policy_loss": policy_loss,
+            "total_loss": total_loss,
+            "reward_mean": rewards.mean(),
+            "advantage_mean": advantages.mean(),
+            "entropy": entropy if isinstance(entropy, torch.Tensor) else torch.tensor(0.0, device=current_device),
         })
-        
+
         return total_loss
 
 
 def main():
+    # 减少不必要的verbose输出
+    import os
+    os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+    os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    
     print("Options")
     print(opt)
-    if opt.wblogger is not None:
-        logger  = WandbLogger(project=opt.wblogger,name="AdaIR-Train")
+    
+    # Logger选择逻辑：如果显式禁用wandb或无法联网，使用TensorBoard
+    if opt.disable_wandb:
+        print("[INFO] Wandb disabled by --disable_wandb flag, using TensorBoard logger")
+        logger = TensorBoardLogger(save_dir = "logs/")
+    elif opt.wblogger is not None:
+        try:
+            logger = WandbLogger(project=opt.wblogger, name="AdaIR-Train")
+            print(f"[INFO] Using Wandb logger with project: {opt.wblogger}")
+        except Exception as e:
+            print(f"[WARNING] Failed to initialize Wandb logger: {e}")
+            print("[INFO] Falling back to TensorBoard logger")
+            logger = TensorBoardLogger(save_dir = "logs/")
     else:
         logger = TensorBoardLogger(save_dir = "logs/")
 

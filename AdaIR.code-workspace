@@ -4,6 +4,9 @@
 			"path": "."
 		},
 		{
+			"path": "../adair_baseline"
+		},
+		{
 			"path": "../flow_grpo"
 		}
 	],

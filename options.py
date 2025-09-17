@@ -30,6 +30,7 @@ parser.add_argument('--dehaze_dir', type=str, default='data/Train/Dehaze/',
 parser.add_argument('--output_path', type=str, default="output/", help='output save path')
 parser.add_argument('--ckpt_path', type=str, default="ckpt/Denoise/", help='checkpoint save path')
 parser.add_argument("--wblogger",type=str,default="AdaIR",help = "Determine to log to wandb or not and the project name")
+parser.add_argument("--disable_wandb", action='store_true', help="Disable wandb logging and use TensorBoard instead (useful for offline training)")
 parser.add_argument("--ckpt_dir",type=str,default="AdaIR",help = "Name of the Directory where the checkpoint is to be saved")
 parser.add_argument("--num_gpus",type=int,default= 4, help = "Number of GPUs to use for training")
 
@@ -45,6 +46,14 @@ parser.add_argument('--grpo_w_psnr', type=float, default=0.4, help='Weight for P
 parser.add_argument('--grpo_w_ssim', type=float, default=0.3, help='Weight for SSIM component in reward')
 parser.add_argument('--grpo_w_lpips', type=float, default=0.3, help='Weight for (1-LPIPS) component in reward')
 parser.add_argument('--grpo_w_niqe', type=float, default=0.0, help='Weight for NIQE component in reward (uses 1/(1+niqe))')
+
+# Advanced reward system options
+parser.add_argument('--use_advanced_rewards', action='store_true', help='Use advanced reward system with CLIP, aesthetic, perceptual, PSNR, and SSIM metrics')
+parser.add_argument('--grpo_w_clip', type=float, default=0.25, help='Weight for CLIP similarity component in advanced reward')
+parser.add_argument('--grpo_w_perceptual', type=float, default=0.25, help='Weight for perceptual quality component in advanced reward')  
+parser.add_argument('--grpo_w_aesthetic', type=float, default=0.15, help='Weight for aesthetic quality component in advanced reward')
+parser.add_argument('--grpo_w_psnr_adv', type=float, default=0.20, help='Weight for PSNR component in advanced reward')
+parser.add_argument('--grpo_w_ssim_adv', type=float, default=0.15, help='Weight for SSIM component in advanced reward')
 
 # 新增的GRPO稳定性参数
 parser.add_argument('--grpo_max_grad_norm', type=float, default=0.5, help='Max gradient norm for clipping in GRPO (reduced for stability)')

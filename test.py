@@ -346,7 +346,7 @@ if __name__ == '__main__':
     torch.cuda.set_device(testopt.cuda)
 
     # ckpt_path = "ckpt/" + testopt.ckpt_name
-    ckpt_path = "/data2/haoxuan/AdaIR/flow_grpo_4gpu/epoch=30-step=57660.ckpt"
+    ckpt_path = "/data2/haoxuan/AdaIR/AdaIR/epoch=25-step=96720.ckpt"
 
     denoise_splits = ["bsd68/"]
     derain_splits = ["Rain100L/"]

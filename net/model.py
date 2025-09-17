@@ -337,30 +337,46 @@ class FreModule(nn.Module):
         agg = self.frequency_refine(low_feature, high_feature)
         out = self.channel_cross_agg(y, agg)
 
-        # Optionally apply stochastic fusion scalars for para1/para2
+        # Apply fusion scalars for para1/para2 using policy head
         # Use pooled y to drive the fusion policy head
+        y_pool = F.adaptive_avg_pool2d(y, 1)
+        raw = self.policy_fuse(y_pool)
+        raw = F.softplus(raw) + 1e-4
+        a1 = raw[:, 0, 0, 0]
+        b1 = raw[:, 1, 0, 0]
+        a2 = raw[:, 2, 0, 0]
+        b2 = raw[:, 3, 0, 0]
+        
         fuse_lp = None
         if stochastic:
-            y_pool = F.adaptive_avg_pool2d(y, 1)
-            raw = self.policy_fuse(y_pool)
-            raw = F.softplus(raw) + 1e-4
-            a1 = raw[:, 0, 0, 0]
-            b1 = raw[:, 1, 0, 0]
-            a2 = raw[:, 2, 0, 0]
-            b2 = raw[:, 3, 0, 0]
-            # Sample g1, g2 ~ Beta with 1D params
+            # GRPO模式：从Beta分布采样 - 极大增强方差版本
             from torch.distributions import Beta
-            dist1 = Beta(a1, b1)
-            dist2 = Beta(a2, b2)
+            # 极大增强融合参数的采样多样性
+            temp = 5.0
+            
+            # 统一使用Beta分布，但大幅增强参数
+            dist1 = Beta(torch.clamp(a1 / temp, 0.1, 10.0), torch.clamp(b1 / temp, 0.1, 10.0))
+            dist2 = Beta(torch.clamp(a2 / temp, 0.1, 10.0), torch.clamp(b2 / temp, 0.1, 10.0))
             g1_flat = dist1.rsample()
             g2_flat = dist2.rsample()
+            
+            # 增加更大的随机扰动
+            noise_scale = 0.4  # 大幅增加噪声
+            g1_flat = g1_flat + torch.randn_like(g1_flat) * noise_scale
+            g2_flat = g2_flat + torch.randn_like(g2_flat) * noise_scale
+            g1_flat = torch.clamp(g1_flat, 0.1, 2.0)  # 允许更大范围
+            g2_flat = torch.clamp(g2_flat, 0.1, 2.0)
+            
             g1 = g1_flat.view(-1, 1, 1, 1)
             g2 = g2_flat.view(-1, 1, 1, 1)
-            fuse_lp = dist1.log_prob(g1_flat) + dist2.log_prob(g2_flat)  # [B]
+            fuse_lp = dist1.log_prob(torch.clamp(g1_flat, 1e-6, 1-1e-6)) + dist2.log_prob(torch.clamp(g2_flat, 1e-6, 1-1e-6))  # [B]
         else:
-            # Deterministic mean of Beta: alpha / (alpha + beta) => use 1.0 (no change)
-            g1 = torch.ones(y.size(0), 1, 1, 1, device=y.device, dtype=y.dtype)
-            g2 = torch.ones(y.size(0), 1, 1, 1, device=y.device, dtype=y.dtype)
+            # 预训练模式：使用Beta分布的均值（确定性输出）
+            # Beta分布均值 = alpha / (alpha + beta)
+            g1_flat = a1 / (a1 + b1)
+            g2_flat = a2 / (a2 + b2)
+            g1 = g1_flat.view(-1, 1, 1, 1)
+            g2 = g2_flat.view(-1, 1, 1, 1)
 
         out = out * (self.para1 * g1) + y * (self.para2 * g2)
 
@@ -390,25 +406,45 @@ class FreModule(nn.Module):
         h, w = x.shape[-2:]
         pooled = F.adaptive_avg_pool2d(x, 1)
 
+        # 总是使用策略头来决定频率阈值
+        raw = self.policy_rate(pooled)  # [B,4,1,1]
+        raw = F.softplus(raw) + 1e-4
+        a_h = raw[:, 0, 0, 0]
+        b_h = raw[:, 1, 0, 0]
+        a_w = raw[:, 2, 0, 0]
+        b_w = raw[:, 3, 0, 0]
+        
         if stochastic:
-            # Sample (r_h, r_w) via Beta with safe shapes
-            raw = self.policy_rate(pooled)  # [B,4,1,1]
-            raw = F.softplus(raw) + 1e-4
-            a_h = raw[:, 0, 0, 0]
-            b_h = raw[:, 1, 0, 0]
-            a_w = raw[:, 2, 0, 0]
-            b_w = raw[:, 3, 0, 0]
+            # GRPO模式：从Beta分布采样 - 极大增强方差版本
             from torch.distributions import Beta
-            dist_h = Beta(a_h, b_h)
-            dist_w = Beta(a_w, b_w)
-            r_h_flat = dist_h.rsample()  # [B]
-            r_w_flat = dist_w.rsample()  # [B]
+            # 进一步增强方差：使用更激进的参数组合
+            temp = 5.0  # 大幅增加温度参数，极大增强采样多样性
+            
+            # 统一使用Beta分布，但大幅增强参数
+            dist_h = Beta(torch.clamp(a_h / temp, 0.1, 10.0), torch.clamp(b_h / temp, 0.1, 10.0))
+            dist_w = Beta(torch.clamp(a_w / temp, 0.1, 10.0), torch.clamp(b_w / temp, 0.1, 10.0))
+            r_h_flat = dist_h.rsample()
+            r_w_flat = dist_w.rsample()
+            
+            # 增加更大的随机扰动
+            noise_scale = 0.25  # 增加噪声强度
+            r_h_flat = r_h_flat + torch.randn_like(r_h_flat) * noise_scale
+            r_w_flat = r_w_flat + torch.randn_like(r_w_flat) * noise_scale
+            r_h_flat = torch.clamp(r_h_flat, 0.05, 0.95)  # 扩大采样范围
+            r_w_flat = torch.clamp(r_w_flat, 0.05, 0.95)
+            
             r_h = r_h_flat.view(-1, 1, 1, 1)
             r_w = r_w_flat.view(-1, 1, 1, 1)
             threshold = torch.cat([r_h, r_w], dim=1)
-            log_prob = dist_h.log_prob(r_h_flat) + dist_w.log_prob(r_w_flat)  # [B]
+            log_prob = dist_h.log_prob(torch.clamp(r_h_flat, 1e-6, 1-1e-6)) + dist_w.log_prob(torch.clamp(r_w_flat, 1e-6, 1-1e-6))  # [B]
         else:
-            threshold = self.rate_conv(pooled).sigmoid()
+            # 预训练模式：使用Beta分布的均值（确定性输出）
+            # Beta分布均值 = alpha / (alpha + beta)
+            r_h_flat = a_h / (a_h + b_h)
+            r_w_flat = a_w / (a_w + b_w)
+            r_h = r_h_flat.view(-1, 1, 1, 1)
+            r_w = r_w_flat.view(-1, 1, 1, 1)
+            threshold = torch.cat([r_h, r_w], dim=1)
             log_prob = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
 
         for i in range(mask.shape[0]):

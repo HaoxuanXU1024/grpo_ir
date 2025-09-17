@@ -14,6 +14,7 @@ from net.model import AdaIR
 from utils.val_utils import compute_psnr_ssim
 from utils.pytorch_ssim import SSIM
 import lpips
+from rewards import create_adair_reward_fn
 
 
 class AdaIRGRPOEnv:
@@ -22,14 +23,12 @@ class AdaIRGRPOEnv:
     def __init__(self, 
                  batch_size: int = 1,
                  device: str = "cuda",
-                 reward_weights: Dict[str, float] = None):
-        
-        if reward_weights is None:
-            reward_weights = {"psnr": 0.4, "ssim": 0.3, "lpips": 0.3}
+                 reward_weights: Dict[str, float] = None,
+                 use_advanced_rewards: bool = True):
         
         self.batch_size = batch_size
-        self.reward_weights = reward_weights
         self.device = device
+        self.use_advanced_rewards = use_advanced_rewards
         
         # 初始化AdaIR模型
         # 注意: 这里创建的模型实例主要用于获取结构信息，实际训练中会被外部传入的模型替代
@@ -37,9 +36,30 @@ class AdaIRGRPOEnv:
         self.adair_model = AdaIRTorchRL(decoder=True).to(device)
         self.adair_model.eval()
         
-        # 奖励计算组件
-        self.ssim_metric = SSIM().eval().to(device)
-        self.lpips_metric = lpips.LPIPS(net='alex').eval().to(device)
+        if use_advanced_rewards:
+            # 使用高级奖励系统 - 优化权重配置，包含PSNR/SSIM
+            if reward_weights is None:
+                reward_weights = {
+                    "clip_similarity": 0.25,  # 语义相似度
+                    "perceptual": 0.25,       # 感知质量 (LPIPS)  
+                    "aesthetic": 0.15,        # 美学质量
+                    "psnr": 0.20,            # PSNR指标
+                    "ssim": 0.15,            # SSIM指标
+                }
+            self.reward_config = reward_weights  # 保存配置供后续使用
+            self.reward_fn = create_adair_reward_fn(device, reward_weights)
+            # 预缓存各设备的奖励函数，避免训练时重复创建
+            self._device_reward_cache = {}
+            print(f"[INFO] Using advanced reward system with balanced weights: {reward_weights}")
+        else:
+            # 使用原始奖励系统
+            if reward_weights is None:
+                reward_weights = {"psnr": 0.4, "ssim": 0.3, "lpips": 0.3}
+            self.reward_weights = reward_weights
+            # 奖励计算组件
+            self.ssim_metric = SSIM().eval().to(device)
+            self.lpips_metric = lpips.LPIPS(net='alex').eval().to(device)
+            print(f"[INFO] Using original reward system with weights: {reward_weights}")
         
         # 当前状态
         self.current_degraded = None
@@ -114,6 +134,51 @@ class AdaIRGRPOEnv:
         restored = restored.to(self.device)
         clean = clean.to(self.device)
         
+        if self.use_advanced_rewards:
+            # 使用高级奖励系统
+            with torch.no_grad():
+                try:
+                    # 确保所有张量在同一设备上
+                    current_device = restored.device
+                    restored = restored.to(current_device)
+                    clean = clean.to(current_device)
+                    
+                    # 使用缓存的设备特定奖励函数，避免重复创建
+                    device_key = str(current_device)
+                    if device_key not in self._device_reward_cache:
+                        print(f"[INFO] Creating reward function for device {device_key} (one-time setup)")
+                        
+                        # 设置环境变量以减少HuggingFace的verbose输出
+                        import os
+                        os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+                        os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
+                        
+                        from rewards import create_adair_reward_fn
+                        self._device_reward_cache[device_key] = create_adair_reward_fn(
+                            device=device_key, 
+                            reward_config=self.reward_config
+                        )
+                    
+                    device_specific_reward_fn = self._device_reward_cache[device_key]
+                    rewards = device_specific_reward_fn(restored, clean)
+                    
+                    # 确保奖励是张量格式
+                    if not isinstance(rewards, torch.Tensor):
+                        rewards = torch.tensor(rewards, device=current_device, dtype=torch.float32)
+                    rewards = rewards.view(-1, 1)
+                    return rewards
+                except Exception as e:
+                    print(f"[WARNING] Advanced reward calculation failed: {e}")
+                    print("[INFO] Falling back to simple reward")
+                    # 回退到简单奖励
+                    return self._compute_simple_reward(restored, clean)
+        else:
+            # 使用原始奖励系统
+            return self._compute_simple_reward(restored, clean)
+    
+    def _compute_simple_reward(self, restored: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
+        """计算简单的多指标组合奖励（原始方法）"""
+        
         # 确保指标计算器在正确的设备上
         self.ssim_metric = self.ssim_metric.to(self.device)
         self.lpips_metric = self.lpips_metric.to(self.device)
@@ -147,9 +212,6 @@ class AdaIRGRPOEnv:
                 )
                 
                 rewards[i, 0] = total_reward
-        
-        # 不再需要恢复策略头，因为我们没有修改它
-        # self._restore_policy_heads()
         
         return rewards
     
