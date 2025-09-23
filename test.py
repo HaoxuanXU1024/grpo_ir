@@ -53,21 +53,32 @@ class AdaIRModel(pl.LightningModule):
     
     def forward(self,x):
         if self.grpo_enabled:
-            # Use the trained policy network to determine the adaptive parameters
-            obs = TensorDict({"degraded_image": x}, batch_size=x.shape[:1], device=x.device)
-            
-            # The policy network is deterministic at inference time; it outputs distribution parameters
+            # Ensure networks are on the same device as input
+            device = x.device
+            self.net = self.net.to(device)
+            self.policy_network = self.policy_network.to(device)
+
+            # Build observation for policy network
+            obs = TensorDict({"degraded_image": x}, batch_size=x.shape[:1], device=device)
+
+            # Policy outputs Beta parameters per action; convert to action means
             with torch.no_grad():
                 action_td = self.policy_network(obs)
-            freq_params = action_td["action"]["freq_params"]
-            
-            # Inject these parameters into the main network
-            self.net.inject_policy_params(freq_params)
-            
-            # Run the forward pass in stochastic mode to make it use the injected parameters
-            # The model returns a tuple (restored_image, log_prob) in this mode
-            restored, _ = self.net(x, stochastic=True)
-            return restored
+            freq_params = action_td["action"]["freq_params"]  # [B, 3, 8] = 4 (alpha,beta) pairs per FreModule
+            # Reshape to pairs: [B, 3, 4, 2] -> (..., 0)=alpha, (...,1)=beta
+            params = freq_params.view(freq_params.shape[0], 3, 4, 2)
+            alphas = params[..., 0]
+            betas = params[..., 1]
+            actions = alphas / (alphas + betas + 1e-8)  # [B, 3, 4] -> (r_h, r_w, g1, g2)
+            # Clamp actions to a safe range to avoid extreme masks/fusions
+            actions = torch.clamp(actions, 0.2, 0.8)
+
+            # Inject actions and run stochastic forward (uses injected actions path)
+            self.net.inject_actions(actions)
+            result = self.net(x, stochastic=True)
+            if isinstance(result, tuple):
+                return result[0]
+            return result
         else:
             # Original deterministic forward pass
             return self.net(x)
@@ -339,6 +350,7 @@ if __name__ == '__main__':
     parser.add_argument('--csv_dir', type=str, default='AdaIR_results/train_eval/', help='Where to save CSVs')
     parser.add_argument('--worst_topk', type=int, default=100, help='Top-K worst images to select per task')
     parser.add_argument('--worst_list', type=str, default='AdaIR_results/train_eval/worst_list.txt', help='Path to save worst list (per task appended)')
+    parser.add_argument('--eval_variants', type=str, default='p2', choices=['p0','p1','p2','all'], help='Which inference variants to evaluate (p0=base, p1=ft-no-policy, p2=ft-with-policy, all=run all three)')
     testopt = parser.parse_args()
     
     np.random.seed(0)
@@ -346,7 +358,7 @@ if __name__ == '__main__':
     torch.cuda.set_device(testopt.cuda)
 
     # ckpt_path = "ckpt/" + testopt.ckpt_name
-    ckpt_path = "/data2/haoxuan/AdaIR/AdaIR/epoch=25-step=96720.ckpt"
+    ckpt_path = "/data2/haoxuan/AdaIR/torchrl_grpo_gpu23_advanced_9_23/epoch=32-step=122760.ckpt"
 
     denoise_splits = ["bsd68/"]
     derain_splits = ["Rain100L/"]
@@ -363,139 +375,161 @@ if __name__ == '__main__':
         denoise_tests.append(denoise_testset)
 
     print("CKPT name : {}".format(ckpt_path))
+    # Variants to evaluate: P0 (base), P1 (ft no policy), P2 (ft with policy)
+    variants_to_run = ['p2'] if testopt.eval_variants != 'all' else ['p0','p1','p2']
+    if testopt.eval_variants in ('p0','p1','p2'):
+        variants_to_run = [testopt.eval_variants]
 
-    # 由于新增了 GRPO 的策略头，旧版 ckpt 中没有这些键，使用 strict=False 以兼容加载
-    print(f"Loading checkpoint: {ckpt_path}")
-    if testopt.grpo_torchrl_ckpt:
-        print("INFO: Loading as a GRPO+TorchRL fine-tuned model.")
-    net = AdaIRModel.load_from_checkpoint(
-        ckpt_path,
-        strict=False,
-        grpo_enabled=testopt.grpo_torchrl_ckpt
-    ).cuda()
-    net.eval()
+    original_output_root = testopt.output_path
 
-    # 评测训练集并导出 CSV（可与常规 test 并存）
-    if testopt.eval_train:
-        os.makedirs(testopt.csv_dir, exist_ok=True)
-        if testopt.train_task in ('all', 'derain'):
-            eval_train_derain(net, testopt.train_derain_root, os.path.join(testopt.csv_dir, 'derain.csv'), testopt.worst_topk, testopt.worst_list)
-        if testopt.train_task in ('all', 'dehaze'):
-            eval_train_dehaze(net, testopt.train_dehaze_root, os.path.join(testopt.csv_dir, 'dehaze.csv'), testopt.worst_topk, testopt.worst_list)
-        if testopt.train_task in ('all', 'deblur'):
-            eval_train_deblur(net, testopt.train_deblur_root, os.path.join(testopt.csv_dir, 'deblur.csv'), testopt.worst_topk, testopt.worst_list)
-        if testopt.train_task in ('all', 'enhance'):
-            eval_train_enhance(net, testopt.train_enhance_root, os.path.join(testopt.csv_dir, 'enhance.csv'), testopt.worst_topk, testopt.worst_list)
-        if testopt.train_task in ('all', 'denoise'):
-            eval_train_denoise(net, testopt.train_denoise_root, [15,25,50], testopt.csv_dir)
-        # 若仅做训练集评测，则提前退出
-        if testopt.train_task != 'all' or testopt.eval_train:
-            print('Train evaluation done. CSV saved to', testopt.csv_dir)
-            # 不直接 return，允许继续跑常规 test（如不需要，手动退出即可）
+    for variant in variants_to_run:
+        if variant == 'p0':
+            v_tag = 'P0'
+            v_ckpt = os.path.join('ckpt', testopt.ckpt_name)
+            v_grpo = False
+            print('[P0] Running base pretrained model (no policy).')
+        elif variant == 'p1':
+            v_tag = 'P1'
+            v_ckpt = ckpt_path
+            v_grpo = False
+            print('[P1] Running finetuned weights (policy disabled).')
+        else:
+            v_tag = 'P2'
+            v_ckpt = ckpt_path
+            v_grpo = True
+            print('[P2] Running finetuned weights with TorchRL policy (actions injected).')
 
-    if testopt.mode == 0:
-        for testset,name in zip(denoise_tests,denoise_splits) :
-            print('Start {} testing Sigma=15...'.format(name))
-            test_Denoise(net, testset, sigma=15)
+        print(f'[{v_tag}] Loading checkpoint: {v_ckpt}')
+        try:
+            net = AdaIRModel.load_from_checkpoint(
+                v_ckpt,
+                strict=False,
+                grpo_enabled=v_grpo
+            ).cuda()
+        except Exception as e:
+            print(f'[{v_tag}] Failed to load checkpoint: {e}')
+            continue
+        net.eval()
 
-            print('Start {} testing Sigma=25...'.format(name))
-            test_Denoise(net, testset, sigma=25)
+        # Set variant-specific output root
+        testopt.output_path = os.path.join(original_output_root, v_tag) + '/'
+        os.makedirs(testopt.output_path, exist_ok=True)
 
-            print('Start {} testing Sigma=50...'.format(name))
-            test_Denoise(net, testset, sigma=50)
+        # Optional: evaluate training data and export CSVs
+        if testopt.eval_train:
+            os.makedirs(testopt.csv_dir, exist_ok=True)
+            if testopt.train_task in ('all', 'derain'):
+                eval_train_derain(net, testopt.train_derain_root, os.path.join(testopt.csv_dir, f'derain_{v_tag}.csv'), testopt.worst_topk, testopt.worst_list)
+            if testopt.train_task in ('all', 'dehaze'):
+                eval_train_dehaze(net, testopt.train_dehaze_root, os.path.join(testopt.csv_dir, f'dehaze_{v_tag}.csv'), testopt.worst_topk, testopt.worst_list)
+            if testopt.train_task in ('all', 'deblur'):
+                eval_train_deblur(net, testopt.train_deblur_root, os.path.join(testopt.csv_dir, f'deblur_{v_tag}.csv'), testopt.worst_topk, testopt.worst_list)
+            if testopt.train_task in ('all', 'enhance'):
+                eval_train_enhance(net, testopt.train_enhance_root, os.path.join(testopt.csv_dir, f'enhance_{v_tag}.csv'), testopt.worst_topk, testopt.worst_list)
+            if testopt.train_task in ('all', 'denoise'):
+                eval_train_denoise(net, testopt.train_denoise_root, [15,25,50], testopt.csv_dir)
+            if testopt.train_task != 'all' or testopt.eval_train:
+                print(f'[{v_tag}] Train evaluation done. CSV saved to {testopt.csv_dir}')
 
-    elif testopt.mode == 1:
-        print('Start testing rain streak removal...')
-        derain_base_path = testopt.derain_path
-        for name in derain_splits:
-            print('Start testing {} rain streak removal...'.format(name))
+        # Task-specific evaluation
+        if testopt.mode == 0:
+            for testset,name in zip(denoise_tests,denoise_splits) :
+                print(f'[{v_tag}] Start {name} testing Sigma=15...')
+                test_Denoise(net, testset, sigma=15)
+
+                print(f'[{v_tag}] Start {name} testing Sigma=25...')
+                test_Denoise(net, testset, sigma=25)
+
+                print(f'[{v_tag}] Start {name} testing Sigma=50...')
+                test_Denoise(net, testset, sigma=50)
+
+        elif testopt.mode == 1:
+            print(f'[{v_tag}] Start testing rain streak removal...')
+            derain_base_path = testopt.derain_path
+            for name in derain_splits:
+                print(f'[{v_tag}] Start testing {name} rain streak removal...')
+                testopt.derain_path = os.path.join(derain_base_path,name)
+                derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
+                test_Derain_Dehaze(net, derain_set, task="derain")
+
+        elif testopt.mode == 2:
+            print(f'[{v_tag}] Start testing SOTS...')
+            derain_base_path = testopt.derain_path
+            name = derain_splits[0]
             testopt.derain_path = os.path.join(derain_base_path,name)
             derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
-            test_Derain_Dehaze(net, derain_set, task="derain")
+            test_Derain_Dehaze(net, derain_set, task="dehaze")
 
-    elif testopt.mode == 2:
-        print('Start testing SOTS...')
-        derain_base_path = testopt.derain_path
-        name = derain_splits[0]
-        testopt.derain_path = os.path.join(derain_base_path,name)
-        derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
-        test_Derain_Dehaze(net, derain_set, task="dehaze")
-
-    elif testopt.mode == 3:
-        print('Start testing GOPRO...')
-        deblur_base_path = testopt.gopro_path
-        name = deblur_splits[0]
-        testopt.gopro_path = os.path.join(deblur_base_path,name)
-        derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15, task='deblur')
-        test_Derain_Dehaze(net, derain_set, task="deblur")
-
-    elif testopt.mode == 4:
-        print('Start testing LOL...')
-        enhance_base_path = testopt.enhance_path
-        name = derain_splits[0]
-        testopt.enhance_path = os.path.join(enhance_base_path,name, task='enhance')
-        derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
-        test_Derain_Dehaze(net, derain_set, task="enhance")
-
-    elif testopt.mode == 5:
-        for testset,name in zip(denoise_tests,denoise_splits) :
-            print('Start {} testing Sigma=15...'.format(name))
-            test_Denoise(net, testset, sigma=15)
-
-            print('Start {} testing Sigma=25...'.format(name))
-            test_Denoise(net, testset, sigma=25)
-
-            print('Start {} testing Sigma=50...'.format(name))
-            test_Denoise(net, testset, sigma=50)
-
-        derain_base_path = testopt.derain_path
-        print(derain_splits)
-        for name in derain_splits:
-
-            print('Start testing {} rain streak removal...'.format(name))
-            testopt.derain_path = os.path.join(derain_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55)
-            test_Derain_Dehaze(net, derain_set, task="derain")
-
-        print('Start testing SOTS...')
-        test_Derain_Dehaze(net, derain_set, task="dehaze")
-
-    elif testopt.mode == 6:
-        for testset,name in zip(denoise_tests,denoise_splits) :
-            print('Start {} testing Sigma=15...'.format(name))
-            test_Denoise(net, testset, sigma=15)
-
-            print('Start {} testing Sigma=25...'.format(name))
-            test_Denoise(net, testset, sigma=25)
-
-            print('Start {} testing Sigma=50...'.format(name))
-            test_Denoise(net, testset, sigma=50)
-
-        derain_base_path = testopt.derain_path
-        print(derain_splits)
-        for name in derain_splits:
-
-            print('Start testing {} rain streak removal...'.format(name))
-            testopt.derain_path = os.path.join(derain_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55)
-            test_Derain_Dehaze(net, derain_set, task="derain")
-
-        print('Start testing SOTS...')
-        test_Derain_Dehaze(net, derain_set, task="dehaze")
-
-        deblur_base_path = testopt.gopro_path
-        for name in deblur_splits:
-            print('Start testing GOPRO...')
-
-            # print('Start testing {} rain streak removal...'.format(name))
+        elif testopt.mode == 3:
+            print(f'[{v_tag}] Start testing GOPRO...')
+            deblur_base_path = testopt.gopro_path
+            name = deblur_splits[0]
             testopt.gopro_path = os.path.join(deblur_base_path,name)
-            deblur_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55, task='deblur')
-            test_Derain_Dehaze(net, deblur_set, task="deblur")
+            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15, task='deblur')
+            test_Derain_Dehaze(net, derain_set, task="deblur")
 
-        enhance_base_path = testopt.enhance_path
-        for name in enhance_splits:
-
-            print('Start testing LOL...')
-            testopt.enhance_path = os.path.join(enhance_base_path,name)
-            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55, task='enhance')
+        elif testopt.mode == 4:
+            print(f'[{v_tag}] Start testing LOL...')
+            enhance_base_path = testopt.enhance_path
+            name = derain_splits[0]
+            testopt.enhance_path = os.path.join(enhance_base_path,name, task='enhance')
+            derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=15)
             test_Derain_Dehaze(net, derain_set, task="enhance")
+
+        elif testopt.mode == 5:
+            for testset,name in zip(denoise_tests,denoise_splits) :
+                print(f'[{v_tag}] Start {name} testing Sigma=15...')
+                test_Denoise(net, testset, sigma=15)
+
+                print(f'[{v_tag}] Start {name} testing Sigma=25...')
+                test_Denoise(net, testset, sigma=25)
+
+                print(f'[{v_tag}] Start {name} testing Sigma=50...')
+                test_Denoise(net, testset, sigma=50)
+
+            derain_base_path = testopt.derain_path
+            print(derain_splits)
+            for name in derain_splits:
+                print(f'[{v_tag}] Start testing {name} rain streak removal...')
+                testopt.derain_path = os.path.join(derain_base_path,name)
+                derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55)
+                test_Derain_Dehaze(net, derain_set, task="derain")
+
+            print(f'[{v_tag}] Start testing SOTS...')
+            test_Derain_Dehaze(net, derain_set, task="dehaze")
+
+        elif testopt.mode == 6:
+            for testset,name in zip(denoise_tests,denoise_splits) :
+                print(f'[{v_tag}] Start {name} testing Sigma=15...')
+                test_Denoise(net, testset, sigma=15)
+
+                print(f'[{v_tag}] Start {name} testing Sigma=25...')
+                test_Denoise(net, testset, sigma=25)
+
+                print(f'[{v_tag}] Start {name} testing Sigma=50...')
+                test_Denoise(net, testset, sigma=50)
+
+            derain_base_path = testopt.derain_path
+            print(derain_splits)
+            for name in derain_splits:
+                print(f'[{v_tag}] Start testing {name} rain streak removal...')
+                testopt.derain_path = os.path.join(derain_base_path,name)
+                derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55)
+                test_Derain_Dehaze(net, derain_set, task="derain")
+
+            print(f'[{v_tag}] Start testing SOTS...')
+            test_Derain_Dehaze(net, derain_set, task="dehaze")
+
+            deblur_base_path = testopt.gopro_path
+            for name in deblur_splits:
+                print(f'[{v_tag}] Start testing GOPRO...')
+                testopt.gopro_path = os.path.join(deblur_base_path,name)
+                deblur_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55, task='deblur')
+                test_Derain_Dehaze(net, deblur_set, task="deblur")
+
+            enhance_base_path = testopt.enhance_path
+            for name in enhance_splits:
+                print(f'[{v_tag}] Start testing LOL...')
+                testopt.enhance_path = os.path.join(enhance_base_path,name)
+                derain_set = DerainDehazeDataset(testopt,addnoise=False,sigma=55, task='enhance')
+                test_Derain_Dehaze(net, derain_set, task="enhance")

@@ -48,8 +48,8 @@ torchrun \
     --master_port=12357 \
     /data2/haoxuan/AdaIR/train.py \
     --resume_ckpt /data2/haoxuan/AdaIR/ckpt/adair5d.ckpt \
+    --wblogger AdaIR-TorchRL-GRPO-GPU23 \
     --grpo --grpo_torchrl \
-    --use_advanced_rewards \
     --grpo_w_clip 0.25 \
     --grpo_w_perceptual 0.25 \
     --grpo_w_aesthetic 0.15 \
@@ -67,7 +67,8 @@ torchrun \
     --train_policy_only \
     --finetune_worst \
     --worst_dir AdaIR_results/worst_lists_adair5d \
-    --ckpt_dir torchrl_grpo_gpu23_advanced_9_15
+    --ckpt_dir torchrl_grpo_gpu23_advanced_9_23
+    # --use_advanced_rewards \
     # 纯GRPO不使用PPO剪裁参数 \
     # --disable_wandb \
     

@@ -181,11 +181,9 @@ class AdaIRModel(pl.LightningModule):
 
             self.log_dict({
                 "policy_loss": pg_loss,
-                "supervised_loss": sup_loss,
                 "total_loss": loss,
                 "reward_mean": rewards.mean(),
-                "advantage_mean": advantages.mean(),
-            })
+            }, on_step=False, on_epoch=True, prog_bar=True)
             return loss
         else:
             # GRPO: group sampling (original implementation)
@@ -291,12 +289,9 @@ class AdaIRModel(pl.LightningModule):
             # 精简日志记录 - 只保留核心指标
             self.log_dict({
                 "policy_loss": pg_loss,
-                "supervised_loss": sup_loss,
                 "total_loss": loss,
                 "reward_mean": rewards.mean(),
-                "advantage_mean": advantages.mean(),
-                "lambda_sup": lambda_sup,
-            })
+            }, on_step=False, on_epoch=True, prog_bar=True)
             return loss
     
     def lr_scheduler_step(self,scheduler,metric):
@@ -318,27 +313,12 @@ class AdaIRModel(pl.LightningModule):
             policy_params = list(self.policy_network.parameters()) if hasattr(self, 'policy_network') else []
             value_params = list(self.value_network.parameters()) if hasattr(self, 'value_network') else []
 
+            # In TorchRL path we use external actions; internal GRPO heads are not used at inference.
+            # For stability, when training policy-only we do NOT include backbone/LoRA/heads.
             fre_head_params = []
-            for m in self.net.modules():
-                if m.__class__.__name__ == 'FreModule':
-                    for name, p in m.named_parameters():
-                        if name.startswith('policy_rate') or name.startswith('policy_fuse'):
-                            fre_head_params.append(p)
-
             lora_params = []
-            if opt.lora:
-                for m in self.net.modules():
-                    if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
-                        lora_params.extend(list(m.down.parameters()))
-                        lora_params.extend(list(m.up.parameters()))
-
             norm_refine_params = []
-            for name, module in self.net.named_modules():
-                if any(dec_name in name for dec_name in ['decoder_level1', 'refinement']):
-                    if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
-                        norm_refine_params.extend(list(module.parameters()))
-
-            output_params = list(self.net.output.parameters()) if hasattr(self.net, 'output') else []
+            output_params = []
 
             # 去重
             policy_params = unique_params(policy_params)
@@ -356,18 +336,14 @@ class AdaIRModel(pl.LightningModule):
 
             param_groups = []
             if opt.train_policy_only:
+                # Freeze backbone to prevent degradation; train policy network only
+                for p in self.net.parameters():
+                    p.requires_grad = False
+                if hasattr(self, 'value_network'):
+                    for p in self.value_network.parameters():
+                        p.requires_grad = False
                 if len(policy_params) > 0:
                     param_groups.append({'params': policy_params, 'lr': lr_policy})
-                if len(fre_head_params) > 0:
-                    param_groups.append({'params': fre_head_params, 'lr': lr_heads})
-                if len(lora_params) > 0:
-                    param_groups.append({'params': lora_params, 'lr': lr_mid})
-                if len(norm_refine_params) > 0:
-                    param_groups.append({'params': norm_refine_params, 'lr': lr_mid})
-                if len(output_params) > 0:
-                    param_groups.append({'params': output_params, 'lr': lr_mid})
-                if len(value_params) > 0:
-                    param_groups.append({'params': value_params, 'lr': lr_value})
             else:
                 # 全参数微调：策略相关仍然更高LR，其余使用base_lr
                 all_rest = []
@@ -377,21 +353,17 @@ class AdaIRModel(pl.LightningModule):
                         all_rest.append(p)
                 if len(policy_params) > 0:
                     param_groups.append({'params': policy_params, 'lr': lr_policy})
-                if len(fre_head_params) > 0:
-                    param_groups.append({'params': fre_head_params, 'lr': lr_heads})
+                # keep the rest as-is only for full finetune
                 if len(value_params) > 0:
                     param_groups.append({'params': value_params, 'lr': lr_value})
-                if len(lora_params) > 0:
-                    param_groups.append({'params': lora_params, 'lr': lr_mid})
-                if len(norm_refine_params) > 0:
-                    param_groups.append({'params': norm_refine_params, 'lr': lr_mid})
-                if len(output_params) > 0:
-                    param_groups.append({'params': output_params, 'lr': lr_mid})
                 if len(all_rest) > 0:
                     param_groups.append({'params': unique_params(all_rest), 'lr': base_lr})
 
             optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
-            print(f"[INFO] TorchRL GRPO optimizer with param groups: policy={lr_policy}, fre_heads={lr_heads}, value={lr_value}, mid={lr_mid}, base={base_lr}")
+            if opt.train_policy_only:
+                print(f"[INFO] TorchRL GRPO optimizer (policy-only): policy_lr={lr_policy}; backbone frozen")
+            else:
+                print(f"[INFO] TorchRL GRPO optimizer with param groups: policy={lr_policy}, value={lr_value}, base={base_lr}")
 
         # Original GRPO or standard（非TorchRL）
         elif opt.train_policy_only:
@@ -475,41 +447,9 @@ class AdaIRModel(pl.LightningModule):
             # Get parameters based on training mode
             if opt.train_policy_only:
                 params = []
-                
-                # 修复：为TorchRL GRPO添加策略网络和价值网络参数
                 if opt.grpo_torchrl:
-                    # 添加TorchRL组件参数
                     if hasattr(self, 'policy_network'):
                         params.extend(list(self.policy_network.parameters()))
-                    if hasattr(self, 'value_network'):
-                        params.extend(list(self.value_network.parameters()))
-                
-                # 添加FreModule策略头参数
-                for m in self.net.modules():
-                    name = m.__class__.__name__
-                    if name == 'FreModule':
-                        for subn, p in m.named_parameters():
-                            if subn.startswith('policy_rate') or subn.startswith('policy_fuse'):
-                                params.append(p)
-                    # Collect LoRA params if wrapped
-                    if hasattr(m, 'down') and hasattr(m, 'up') and hasattr(m, 'base'):
-                        for p in m.down.parameters():
-                            params.append(p)
-                        for p in m.up.parameters():
-                            params.append(p)
-                
-                # Add the same additional parameters as in configure_optimizers
-                # 1. Add LayerNorm parameters from decoder and refinement layers
-                for name, module in self.net.named_modules():
-                    if any(decoder_name in name for decoder_name in ['decoder_level1', 'refinement']):
-                        if 'norm' in name.lower() or isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, nn.GroupNorm)):
-                            params.extend(list(module.parameters()))
-                
-                # 2. Add the final output layer parameters
-                params.extend(list(self.net.output.parameters()))
-                
-                # 3. Add refinement layer parameters (safe to fine-tune)
-                params.extend(list(self.net.refinement.parameters()))
             else:
                 params = self.parameters()
             
@@ -672,9 +612,7 @@ class AdaIRModel(pl.LightningModule):
             "policy_loss": policy_loss,
             "total_loss": total_loss,
             "reward_mean": rewards.mean(),
-            "advantage_mean": advantages.mean(),
-            "entropy": entropy if isinstance(entropy, torch.Tensor) else torch.tensor(0.0, device=current_device),
-        })
+        }, on_step=False, on_epoch=True, prog_bar=True)
 
         return total_loss
 
@@ -689,20 +627,66 @@ def main():
     print("Options")
     print(opt)
     
-    # Logger选择逻辑：如果显式禁用wandb或无法联网，使用TensorBoard
+    # Logger选择：仅rank0初始化W&B，避免多进程产生多个runs；其余rank禁用logger
+    rank_str = os.environ.get("RANK", "0")
+    try:
+        global_rank = int(rank_str)
+    except Exception:
+        global_rank = 0
+
     if opt.disable_wandb:
         print("[INFO] Wandb disabled by --disable_wandb flag, using TensorBoard logger")
         logger = TensorBoardLogger(save_dir = "logs/")
-    elif opt.wblogger is not None:
+    elif opt.wblogger is not None and global_rank == 0:
         try:
-            logger = WandbLogger(project=opt.wblogger, name="AdaIR-Train")
-            print(f"[INFO] Using Wandb logger with project: {opt.wblogger}")
+            logger = WandbLogger(
+                project=opt.wblogger,
+                name="AdaIR-GRPO",
+                log_model=False,
+                group="TorchRL-GRPO",
+                job_type="train"
+            )
+            print(f"[INFO] Using Wandb logger (rank0) with project: {opt.wblogger}")
         except Exception as e:
             print(f"[WARNING] Failed to initialize Wandb logger: {e}")
             print("[INFO] Falling back to TensorBoard logger")
             logger = TensorBoardLogger(save_dir = "logs/")
     else:
-        logger = TensorBoardLogger(save_dir = "logs/")
+        logger = False
+
+    # 记录精简超参到W&B（仅rank0）
+    if logger and isinstance(logger, WandbLogger):
+        try:
+            reward_cfg = {}
+            if getattr(opt, 'use_advanced_rewards', False):
+                reward_cfg = {
+                    'clip': getattr(opt, 'grpo_w_clip', 0.25),
+                    'perceptual': getattr(opt, 'grpo_w_perceptual', 0.25),
+                    'aesthetic': getattr(opt, 'grpo_w_aesthetic', 0.15),
+                    'psnr': getattr(opt, 'grpo_w_psnr_adv', 0.20),
+                    'ssim': getattr(opt, 'grpo_w_ssim_adv', 0.15),
+                }
+            else:
+                reward_cfg = {
+                    'psnr': getattr(opt, 'grpo_w_psnr', 0.4),
+                    'ssim': getattr(opt, 'grpo_w_ssim', 0.3),
+                    'lpips': getattr(opt, 'grpo_w_lpips', 0.3),
+                }
+            logger.experiment.config.update({
+                'lr': getattr(opt, 'lr', 5e-5),
+                'epochs': getattr(opt, 'epochs', 50),
+                'batch_size': getattr(opt, 'batch_size', 1),
+                'grpo_group': getattr(opt, 'grpo_group', 4),
+                'grpo_torchrl': getattr(opt, 'grpo_torchrl', False),
+                'train_policy_only': getattr(opt, 'train_policy_only', False),
+                'use_advanced_rewards': getattr(opt, 'use_advanced_rewards', False),
+                'reward_cfg': reward_cfg,
+                'clip_range': getattr(opt, 'grpo_clip_range', 0.2),
+                'adv_clip_max': getattr(opt, 'grpo_adv_clip_max', 5.0),
+                'max_grad_norm': getattr(opt, 'grpo_max_grad_norm', 0.5),
+            }, allow_val_change=True)
+        except Exception as e:
+            print(f"[WARN] Failed to log hyperparams to WandB: {e}")
 
     # Optional: restrict training to worst-case lists for GRPO finetuning
     trainset = AdaIRTrainDataset(opt)
